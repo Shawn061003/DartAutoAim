@@ -1,7 +1,7 @@
 // Single-camera calibration: OpenCV 4.x, C++17.
 // Defaults: annotated images in ./CS200; parameters in ./CS200_calibration
-// Build: g++ -std=c++17 -O2 demarcate.cpp -o demarcate $(pkg-config --cflags --libs opencv4)
-// Run (only after review): ./demarcate [image_directory] [new_output_directory]
+// Build: g++ -std=c++17 -O2 sub_module/demarcate.cpp -o demarcate $(pkg-config --cflags --libs opencv4)
+// Run (only after review): ./demarcate [image_directory] [new_output_directory] [full|narrow]
 // Images must share the same resolution, zoom and focus settings.
 // The output directory must not already exist, to preserve earlier results.
 #include <opencv2/opencv.hpp>
@@ -35,13 +35,17 @@ void saveImage(const fs::path& path, const cv::Mat& image) {
 
 int main(int argc, char** argv) {
     try {
-        if (argc > 3 || (argc > 1 && std::string(argv[1]) == "--help")) {
+        if (argc > 4 || (argc > 1 && std::string(argv[1]) == "--help")) {
             std::cout << "Usage: " << argv[0]
-                      << " [image_directory=CS200] [new_output_directory=CS200_calibration]\n";
-            return argc > 3 ? 1 : 0;
+                      << " [image_directory=CS200] [new_output_directory=CS200_calibration]"
+                         " [model=full|narrow]\n";
+            return argc > 4 ? 1 : 0;
         }
         const fs::path input = argc > 1 ? argv[1] : "CS200";
         const fs::path output = argc > 2 ? argv[2] : "CS200_calibration";
+        const std::string calibrationModel = argc > 3 ? argv[3] : "full";
+        if (calibrationModel != "full" && calibrationModel != "narrow")
+            throw std::runtime_error("Calibration model must be 'full' or 'narrow'.");
         if (!fs::is_directory(input))
             throw std::runtime_error("Image directory does not exist: " + input.string());
         if (fs::exists(output))
@@ -147,10 +151,15 @@ int main(int argc, char** argv) {
         cv::Mat K = cv::Mat::eye(3, 3, CV_64F);
         cv::Mat D = cv::Mat::zeros(5, 1, CV_64F);
         std::vector<cv::Mat> rvecs, tvecs;
-        // Standard pinhole/Brown model: k1, k2, p1, p2, k3.
-        // No guessed focal length, fixed principal point, or higher-order model.
+        // The narrow-FOV profile prevents weakly observable distortion terms from
+        // trading off against the principal point. The full profile retains the
+        // standard five-coefficient Brown model for well-covered datasets.
+        const int calibrationFlags = calibrationModel == "narrow"
+            ? cv::CALIB_FIX_PRINCIPAL_POINT | cv::CALIB_ZERO_TANGENT_DIST |
+              cv::CALIB_FIX_K2 | cv::CALIB_FIX_K3
+            : 0;
         const double rms = cv::calibrateCamera(objectPoints, imagePoints, imageSize,
-            K, D, rvecs, tvecs, 0,
+            K, D, rvecs, tvecs, calibrationFlags,
             cv::TermCriteria(cv::TermCriteria::EPS | cv::TermCriteria::COUNT, 100, 1e-9));
         if (!std::isfinite(rms) || !cv::checkRange(K) || !cv::checkRange(D) ||
             K.at<double>(0, 0) <= 0 || K.at<double>(1, 1) <= 0)
@@ -173,6 +182,10 @@ int main(int argc, char** argv) {
              << "square_size_mm" << SQUARE_MM
              << "camera_matrix" << K << "distortion_coefficients" << D
              << "distortion_order" << "k1,k2,p1,p2,k3"
+             << "calibration_model" << calibrationModel
+             << "calibration_constraints" << (calibrationModel == "narrow"
+                    ? "principal_point=image_center,tangential=zero,k2=zero,k3=zero"
+                    : "none")
              << "rms_reprojection_error_px" << rms
              << "per_view_rms_px" << perViewRms;
         // Each pose maps board coordinates (mm) into camera coordinates.
