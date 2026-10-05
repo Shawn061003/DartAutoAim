@@ -1,9 +1,9 @@
 #pragma once
 
 #include "Acquisition/AcquireFrame.h"
+#include "common/DartConfig.h"
 
 #include <memory>
-#include <string>
 
 // 文件输入后端：以后视频后端只需实现此接口，并在模式工厂中注册。
 class StereoImageSource {
@@ -14,22 +14,11 @@ public:
     virtual bool readNext(cv::Mat& left, cv::Mat& right) = 0;
 };
 
-struct VideoInputConfig {
-    enum class Mode { Images, Video };
-    Mode mode = Mode::Images;
-    std::string leftPath;
-    std::string rightPath;
-    std::size_t queueCapacity = 4; // 左右每侧可缓存的帧数
-    bool repeat = true;           // 图片重复采集；false 时只输出一对
-
-    // 相对媒体路径以 YAML 所在目录为基准；失败异常包含配置路径。
-    static VideoInputConfig load(const std::string& configPath);
-};
-
 class VideoInput {
 public:
-    explicit VideoInput(const std::string& configPath = "config/video.yaml");
-    explicit VideoInput(const VideoInputConfig& config);
+    // 使用已解析的输入参数创建数据源，queueCapacity 指定每侧缓存帧数。
+    // 图片默认只读取一对；repeat=true 时重复提供这对图片，供连续处理使用。
+    VideoInput(const InputParams& input, std::size_t queueCapacity, bool repeat = false);
     // 注入视频等新后端，队列和下游接口无需修改。
     VideoInput(std::unique_ptr<StereoImageSource> source, std::size_t queueCapacity);
 

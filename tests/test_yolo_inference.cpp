@@ -19,10 +19,10 @@ void Require(bool condition, const std::string& message)
 }
 
 void WriteFixture(const std::filesystem::path& path,
-                  const std::vector<std::array<float, 5>>& rows, bool mixed = false)
+                  const std::vector<std::array<float, 5>>& rows, bool mixed = false, int inputSize = 512)
 {
     namespace op = ov::opset13;
-    auto input = std::make_shared<op::Parameter>(ov::element::f32, ov::PartialShape{-1, 3, 512, 512});
+    auto input = std::make_shared<op::Parameter>(ov::element::f32, ov::PartialShape{-1, 3, inputSize, inputSize});
     auto mean = std::make_shared<op::ReduceMean>(input,
         op::Constant::create(ov::element::i64, ov::Shape{2}, {2, 3}), false);
     auto axis = op::Constant::create(ov::element::i64, ov::Shape{}, {1});
@@ -203,6 +203,45 @@ int main(int argc, char** argv)
         try { detector.RunYOLOInfer(left, right); }
         catch (const std::invalid_argument&) { rejected = true; }
         Require(rejected, "Empty frame was not rejected.");
+
+        // 独立构造 256 输入模型，验证边长、切块重叠和左右 padding 实际生效。
+        WriteFixture(models / "small.xml", {{128, 128, 20, 20, 1}}, false, 256);
+        YOLOParams params;
+        params.modelPath = (models / "small.xml").string();
+        params.inputSize = 256;
+        params.tileOverlapPx = 0;
+        params.leftPaddingPx = 3;
+        params.rightPaddingPx = 7;
+        params.warmupCount = 1;
+        CameraFrame configuredLeft{cv::Mat(512, 512, CV_8UC3, cv::Scalar(0, 0, 255)), 5, 10};
+        CameraFrame configuredRight{cv::Mat(256, 256, CV_8UC3, cv::Scalar(0, 0, 255)), 6, 10};
+        YOLOInference configured(params);
+        auto configuredResult = configured.RunYOLOInfer(configuredLeft, configuredRight);
+        Expect(configuredResult.left, cv::Rect(115, 115, 26, 26), 5, 10);
+        Expect(configuredResult.right, cv::Rect(111, 111, 34, 34), 6, 10);
+
+        params.confidenceThreshold = 1.0F;
+        YOLOInference filtered(params);
+        Require(filtered.RunYOLOInfer(configuredLeft, configuredRight).right.empty(),
+                "Configured confidence threshold was ignored.");
+
+        params.confidenceThreshold = 0.25F;
+        params.inputSize = 512;
+        bool mismatchRejected = false;
+        try { YOLOInference bad(params); }
+        catch (const std::runtime_error&) { mismatchRejected = true; }
+        Require(mismatchRejected, "Model/input_size mismatch was accepted.");
+
+        // 调整 NMS 阈值后，第一框抑制中间框，使后续分离框保留下来。
+        WriteFixture(models / "nms_chain.xml", {
+            {120, 120, 40, 40, .95F}, {150, 120, 40, 40, .90F}, {180, 120, 40, 40, .85F}});
+        params.modelPath = (models / "nms_chain.xml").string();
+        params.nmsIouThreshold = 0.1F;
+        params.rightPaddingPx = 0;
+        configuredRight.image = cv::Mat(512, 512, CV_8UC3, cv::Scalar(0, 0, 255));
+        YOLOInference nmsConfigured(params);
+        configuredResult = nmsConfigured.RunYOLOInfer(configuredLeft, configuredRight);
+        Expect(configuredResult.right, cv::Rect(160, 100, 40, 40), 6, 10, 1);
         std::cout << "YOLO regression checks passed.\n";
         return 0;
     } catch (const std::exception& error) {

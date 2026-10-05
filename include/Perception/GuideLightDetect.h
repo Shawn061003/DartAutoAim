@@ -13,6 +13,9 @@
 class GuideLightDetect
 {
 public:
+    // 主程序传入 YAML 中的 HSV 阈值；默认参数供离线工具直接构造使用。
+    explicit GuideLightDetect(const GuideLightParams& params = {});
+
     enum class DetectStatus {
         SUCCESS,
         FAILED
@@ -48,9 +51,9 @@ public:
 private:
     // 调参测试访问同一份GetContours实现，不开放生产流程中的中间步骤。
     friend class GuideLightDetectTestAccess;
-    // TODO 后续移入config；OpenCV 8位HSV：H 0~179，S/V 0~255。
-    cv::Scalar hsv_lower_{60, 102, 81};
-    cv::Scalar hsv_upper_{86, 212, 255};
+    // 由构造参数初始化；OpenCV 8位HSV：H 0~179，S/V 0~255。
+    cv::Scalar hsv_lower_;
+    cv::Scalar hsv_upper_;
     /// @brief 在单个ROI内筛选高亮绿色，并选取圆度最高的有效外轮廓。
     /// @param image CV_8UC3 BGR全图；roi为YOLO提供的有效区域。
     /// @return 全图坐标下的有序外轮廓，保留全部边界像素；无有效轮廓时返回空集合。

@@ -77,6 +77,21 @@ int main()
         Require(cv::norm(left.image, originalLeft, cv::NORM_INF) == 0
                 && cv::norm(right.image, originalRight, cv::NORM_INF) == 0,
                 "Detection modified an input image.");
+
+        // 自定义 HSV 排除绿色，确认构造参数进入实际轮廓筛选。
+        GuideLightParams params;
+        params.hsvLower = cv::Scalar(0, 100, 100);
+        params.hsvUpper = cv::Scalar(10, 255, 255);
+        GuideLightDetect configured(params);
+        const auto excluded = configured.RunDetection(left, right, yolo);
+        Require(excluded.right.size() == 1 &&
+                excluded.right[0].status == GuideLightDetect::DetectStatus::FAILED,
+                "Configured HSV bounds were ignored.");
+        params.hsvLower[0] = 180;
+        bool rejected = false;
+        try { GuideLightDetect bad(params); }
+        catch (const std::invalid_argument&) { rejected = true; }
+        Require(rejected, "Invalid HSV bounds accepted.");
         std::cout << "Guide light detection checks passed.\n";
         return 0;
     } catch (const std::exception& error) {

@@ -1,12 +1,21 @@
 #include "common/DartConfig.h"
 
 #include <cmath>
+#include <filesystem>
 #include <limits>
 #include <stdexcept>
 #include <utility>
 
 // 解析辅助函数仅在当前源文件内使用。prefix/name 用于生成带相机侧别的字段路径。
 namespace {
+// 文件输入的 mode 与媒体路径不允许为空。
+std::string readNonEmptyString(const cv::FileNode& node, const std::string& field)
+{
+    if (!node.isString() || static_cast<std::string>(node).empty())
+        throw std::runtime_error(field + ": expected a non-empty string");
+    return static_cast<std::string>(node);
+}
+
 // 统一报告字段错误，例如 left_camera.image_width；load 再补充文件路径。
 [[noreturn]] void invalid(const std::string& field, const std::string& reason)
 {
@@ -75,19 +84,18 @@ cv::Mat readMatrix(const cv::FileNode& node, const char* key,
 }
 
 // 解析一侧相机的完整节点，返回通过校验的临时参数。
-DartCongfig::CameraParams readCamera(const cv::FileNode& node,
-                                   const std::string& name)
+CameraParams readCamera(const cv::FileNode& node, const std::string& name)
 {
     if (!node.isMap()) invalid(name, "missing camera section or expected a mapping");
-    DartCongfig::CameraParams camera;
+    CameraParams camera;
     camera.deviceIp = readString(node, "device_ip", name);
     camera.netIp = readString(node, "net_ip", name);
     camera.exposure = static_cast<float>(readNumber(
-        node, "exposure", name, std::numeric_limits<float>::max()));
+        node, "exposure_us", name, std::numeric_limits<float>::max()));
     camera.gain = static_cast<float>(readNumber(
         node, "gain", name, std::numeric_limits<float>::max()));
     camera.extraInfoDelay = readNumber(
-        node, "extra_info_delay", name, std::numeric_limits<double>::max());
+        node, "extra_info_delay_s", name, std::numeric_limits<double>::max());
     camera.width = readDimension(node, "image_width", name);
     camera.height = readDimension(node, "image_height", name);
     camera.cameraMatrix = readMatrix(node, "camera_matrix", name);
@@ -110,6 +118,99 @@ DartCongfig::CameraParams readCamera(const cv::FileNode& node,
     camera.distCoeffs = camera.distCoeffs.reshape(1, 5).clone();
     return camera;
 }
+
+// 结构节点必须为映射，防止缺失节点被当作默认配置使用。
+cv::FileNode section(const cv::FileNode& root, const char* key)
+{
+    const auto node = root[key];
+    if (!node.isMap()) invalid(key, "expected a mapping");
+    return node;
+}
+
+int readInteger(const cv::FileNode& node, const char* key,
+                const std::string& prefix, int minimum)
+{
+    const double value = readNumber(node, key, prefix, std::numeric_limits<int>::max());
+    if (value < minimum || std::floor(value) != value)
+        invalid(prefix + "." + key, "integer value is outside the allowed range");
+    return static_cast<int>(value);
+}
+
+std::string resolvePath(const std::string& value, const std::filesystem::path& base)
+{
+    if (value.empty()) return {};
+    const std::filesystem::path path(value);
+    return (path.is_absolute() ? path : base / path).lexically_normal().string();
+}
+
+InputParams readInput(const cv::FileNode& node, const std::filesystem::path& base)
+{
+    InputParams result;
+    const auto mode = readNonEmptyString(required(node, "mode", "input"), "input.mode");
+    if (mode == "camera") result.mode = InputMode::Camera;
+    else if (mode == "video") result.mode = InputMode::Video;
+    else if (mode == "image") result.mode = InputMode::Image;
+    else invalid("input.mode", "expected camera, video or image");
+
+    const auto path = [&](const char* key) {
+        const auto value = readString(node, key, "input");
+        if (result.mode != InputMode::Camera && value.empty())
+            invalid(std::string("input.") + key, "expected a non-empty media path");
+        return resolvePath(value, base);
+    };
+    result.leftPath = path("left_path");
+    result.rightPath = path("right_path");
+    return result;
+}
+
+FrameQueueParams readQueue(const cv::FileNode& node)
+{
+    FrameQueueParams result;
+    result.capacity = static_cast<std::size_t>(readInteger(node, "capacity", "frame_queue", 1));
+    result.maxTimestampDiffMs = readInteger(node, "max_timestamp_diff_ms", "frame_queue", 0);
+    return result;
+}
+
+YOLOParams readYOLO(const cv::FileNode& node, const std::filesystem::path& base)
+{
+    YOLOParams result;
+    result.modelPath = resolvePath(
+        readNonEmptyString(required(node, "model_path", "yolo"), "yolo.model_path"), base);
+    result.device = readNonEmptyString(required(node, "device", "yolo"), "yolo.device");
+    result.inputSize = readInteger(node, "input_size", "yolo", 1);
+    result.tileOverlapPx = readInteger(node, "tile_overlap_px", "yolo", 0);
+    result.leftPaddingPx = readInteger(node, "left_padding_px", "yolo", 0);
+    result.rightPaddingPx = readInteger(node, "right_padding_px", "yolo", 0);
+    result.confidenceThreshold = static_cast<float>(readNumber(node, "confidence_threshold", "yolo", 1));
+    result.nmsIouThreshold = static_cast<float>(readNumber(node, "nms_iou_threshold", "yolo", 1));
+    result.warmupCount = readInteger(node, "warmup_count", "yolo", 1);
+    result.validate();
+    return result;
+}
+
+cv::Scalar readHSV(const cv::FileNode& node, const char* key)
+{
+    const auto values = required(node, key, "guide_light");
+    const std::string field = std::string("guide_light.") + key;
+    if (!values.isSeq() || values.size() != 3) invalid(field, "expected [H,S,V]");
+    cv::Scalar result;
+    for (int i = 0; i < 3; ++i) {
+        const auto value = values[i];
+        if (!value.isInt() && !value.isReal()) invalid(field, "expected numeric HSV values");
+        result[i] = static_cast<double>(value);
+    }
+    return result;
+}
+
+GuideLightParams readGuideLight(const cv::FileNode& node)
+{
+    GuideLightParams result;
+    result.hsvLower = readHSV(node, "hsv_lower");
+    result.hsvUpper = readHSV(node, "hsv_upper");
+    result.validate();
+    return result;
+}
+
 } // namespace
 
 DartCongfig::DartCongfig(const std::string& configPath)
@@ -120,19 +221,26 @@ DartCongfig::DartCongfig(const std::string& configPath)
 void DartCongfig::load(const std::string& configPath)
 {
     try {
-        // FileStorage 在离开作用域时释放文件资源，矩阵数据由返回的 cv::Mat 持有。
         cv::FileStorage file(configPath, cv::FileStorage::READ);
         if (!file.isOpened()) throw std::runtime_error("cannot open configuration file");
-        auto left = readCamera(file["left_camera"], "left_camera");
-        auto right = readCamera(file["right_camera"], "right_camera");
-        // 两侧均通过校验后再更新；任一侧解析失败时，原有成员保持原值。
+        const auto root = file.root();
+        const auto base = std::filesystem::absolute(configPath).parent_path();
+        auto nextInput = readInput(section(root, "input"), base);
+        auto nextQueue = readQueue(section(root, "frame_queue"));
+        const auto cameras = section(root, "cameras");
+        auto left = readCamera(cameras["left"], "cameras.left");
+        auto right = readCamera(cameras["right"], "cameras.right");
+        auto nextYOLO = readYOLO(section(root, "yolo"), base);
+        auto nextGuideLight = readGuideLight(section(root, "guide_light"));
+
+        // 全部板块校验通过后提交，任何解析错误都保留之前的配置。
+        input = std::move(nextInput);
+        frameQueue = nextQueue;
         leftCamera = std::move(left);
         rightCamera = std::move(right);
-    } catch (const cv::Exception& error) {
-        // 补充配置文件路径，供入口统一输出加载失败原因。
-        throw std::runtime_error("DartCongfig [" + configPath + "]: " + error.what());
-    } catch (const std::runtime_error& error) {
-        // 补充配置文件路径，供入口统一输出加载失败原因。
+        yolo = std::move(nextYOLO);
+        guideLight = nextGuideLight;
+    } catch (const std::exception& error) {
         throw std::runtime_error("DartCongfig [" + configPath + "]: " + error.what());
     }
 }

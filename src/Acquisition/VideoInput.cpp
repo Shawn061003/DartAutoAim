@@ -1,26 +1,18 @@
 #include "Acquisition/VideoInput.h"
 
 #include <chrono>
-#include <filesystem>
 #include <stdexcept>
 #include <utility>
 
 #include <opencv2/imgcodecs.hpp>
 
 namespace {
-std::string readString(const cv::FileNode& node, const std::string& field)
-{
-    if (!node.isString() || static_cast<std::string>(node).empty())
-        throw std::runtime_error(field + ": expected a non-empty string");
-    return static_cast<std::string>(node);
-}
-
 class ImagePairSource final : public StereoImageSource {
 public:
-    explicit ImagePairSource(const VideoInputConfig& config) : repeat_(config.repeat)
+    ImagePairSource(const InputParams& input, bool repeat) : repeat_(repeat)
     {
-        left_ = loadImage(config.leftPath, "left_camera.path");
-        right_ = loadImage(config.rightPath, "right_camera.path");
+        left_ = loadImage(input.leftPath, "input.left_path");
+        right_ = loadImage(input.rightPath, "input.right_path");
     }
 
     bool readNext(cv::Mat& left, cv::Mat& right) override
@@ -45,56 +37,23 @@ private:
     bool emitted_ = false;
 };
 
-std::unique_ptr<StereoImageSource> makeSource(const VideoInputConfig& config)
+std::unique_ptr<StereoImageSource> makeSource(const InputParams& input, bool repeat)
 {
-    switch (config.mode) {
-    case VideoInputConfig::Mode::Images:
-        return std::make_unique<ImagePairSource>(config);
-    case VideoInputConfig::Mode::Video:
-        throw std::runtime_error("mode=video is reserved but not implemented yet; use mode=images");
+    switch (input.mode) {
+    case InputMode::Image:
+        return std::make_unique<ImagePairSource>(input, repeat);
+    // 文件输入后端在创建数据源时检查模式支持情况。
+    case InputMode::Camera:
+        throw std::invalid_argument("input.mode: camera requires the camera acquisition backend");
+    case InputMode::Video:
+        throw std::runtime_error("mode=video is reserved but not implemented yet; use input.mode=image");
     }
     throw std::runtime_error("Unsupported input mode");
 }
 } // namespace
 
-VideoInputConfig VideoInputConfig::load(const std::string& configPath)
-{
-    try {
-        cv::FileStorage file(configPath, cv::FileStorage::READ);
-        if (!file.isOpened()) throw std::runtime_error("cannot open configuration file");
-        VideoInputConfig config;
-        const auto mode = readString(file["mode"], "mode");
-        if (mode == "images") config.mode = Mode::Images;
-        else if (mode == "video") config.mode = Mode::Video;
-        else throw std::runtime_error("mode: expected images or video");
-
-        const auto base = std::filesystem::absolute(configPath).parent_path();
-        const auto readPath = [&](const char* camera) {
-            const auto node = file[camera];
-            if (!node.isMap()) throw std::runtime_error(std::string(camera) + ": expected a mapping");
-            const std::filesystem::path path(readString(node["path"], std::string(camera) + ".path"));
-            return (path.is_absolute() ? path : base / path).lexically_normal().string();
-        };
-        config.leftPath = readPath("left_camera");
-        config.rightPath = readPath("right_camera");
-
-        const auto capacity = file["queue_capacity"];
-        if (!capacity.isInt() || static_cast<int>(capacity) <= 0)
-            throw std::runtime_error("queue_capacity: expected a positive integer");
-        config.queueCapacity = static_cast<std::size_t>(static_cast<int>(capacity));
-        const auto repeat = file["repeat"];
-        if (!repeat.isInt() || (static_cast<int>(repeat) != 0 && static_cast<int>(repeat) != 1))
-            throw std::runtime_error("repeat: expected 0 or 1");
-        config.repeat = static_cast<int>(repeat) != 0;
-        return config;
-    } catch (const std::exception& error) {
-        throw std::runtime_error("VideoInput [" + configPath + "]: " + error.what());
-    }
-}
-
-VideoInput::VideoInput(const std::string& configPath) : VideoInput(VideoInputConfig::load(configPath)) {}
-
-VideoInput::VideoInput(const VideoInputConfig& config) : VideoInput(makeSource(config), config.queueCapacity) {}
+VideoInput::VideoInput(const InputParams& input, std::size_t queueCapacity, bool repeat)
+    : VideoInput(makeSource(input, repeat), queueCapacity) {}
 
 VideoInput::VideoInput(std::unique_ptr<StereoImageSource> source, std::size_t queueCapacity)
     : source_(std::move(source)), queue_(queueCapacity)

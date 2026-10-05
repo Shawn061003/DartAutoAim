@@ -12,6 +12,12 @@
 #include <limits>
 #include <utility>
 
+GuideLightDetect::GuideLightDetect(const GuideLightParams& params)
+    : hsv_lower_(params.hsvLower), hsv_upper_(params.hsvUpper)
+{
+    params.validate();
+}
+
 GuideLightDetect::StereoDetectResult GuideLightDetect::RunDetection(
     const CameraFrame& leftFrame, const CameraFrame& rightFrame,
     const YOLOInference::StereoYOLOResult& result)

@@ -1,7 +1,7 @@
 #ifndef YOLO_INFER_H
 #define YOLO_INFER_H
 
-// 坐标约定：box位于512x512模型输入坐标系；source_region和roi位于原图坐标系。
+// 坐标约定：box位于inputSize × inputSize模型输入坐标系；source_region和roi位于原图坐标系。
 // 矩形使用左上角x/y和宽/高；padding为模型输入中的左、上填充像素数。
 // 后处理先减padding、除以实际缩放比例，再加source_region左上角，得到原图坐标。
 // roi为外扩、向外取整并裁至原图边界后的区域，x/y为其左上角。
@@ -13,6 +13,7 @@
 #include <vector>
 #include <opencv2/core.hpp>
 #include "Acquisition/CameraInput.h"
+#include "common/DartConfig.h"
 
 class YOLOInference {
 public:
@@ -33,7 +34,10 @@ public:
         RightYOLOResult right;
     };
 
-    /// @brief 初始化时加载、编译ONNX模型并warmup；device指定OpenVINO推理设备。
+    /// @brief 使用 YAML 解析后的完整参数加载模型、编译并预热。
+    explicit YOLOInference(const YOLOParams& params);
+
+    /// @brief 离线工具快捷入口：使用默认检测参数，显式指定模型与设备。
     YOLOInference(const std::string& modelPath, const std::string& device);
 
     /// @brief 释放模型资源；定义放在.cpp中。
@@ -45,7 +49,7 @@ public:
 
     /// @brief 同步处理一对已配对图像，返回左右各自最多两个目标的ROI及帧信息。
     /// @note 右相机整图；左相机整图/四切，不做自适应，四切均无候选时回退整图。
-    ///       四切水平、竖直总重叠均为30px；左/右ROI每侧分别外扩25/10px。
+    ///       四切总重叠和左右ROI外扩量由YOLOParams指定。
     ///       不启动线程；调用间保留模型，不重复加载或warmup，同一对象不并发调用。
     StereoYOLOResult RunYOLOInfer(const CameraFrame& leftFrame, const CameraFrame& rightFrame);
 
@@ -57,7 +61,7 @@ private:
     };
 
     struct YOLOPreProcessResult {
-        cv::Mat input;          // 单张512x512输入，布局、通道顺序和类型与模型一致
+        cv::Mat input;          // 单张inputSize × inputSize输入，布局、通道顺序和类型与模型一致
         cv::Rect source_region;
         double scale_x = 1.0;   // 实际缩放后内容宽度 / 原区域宽度
         double scale_y = 1.0;   // 实际缩放后内容高度 / 原区域高度
@@ -71,13 +75,14 @@ private:
     };
 
     // 模型、编译结果和推理请求在.cpp中定义，空闲时保留，随对象析构释放。
+    const YOLOParams params_; // 初始化后保持不变，预处理与模型形状共用同一配置
     struct ModelRuntime;
     std::unique_ptr<ModelRuntime> model_runtime_;
 
     /// @brief 初始化阶段加载、编译模型，完成单张/四张输入所需的warmup。
     void LoadYOLOModule(const std::string& modelPath, const std::string& device);
 
-    /// @brief 按regions取图，等比例缩放、padding至512x512并转换为模型输入格式。
+    /// @brief 按regions取图，等比例缩放、padding至inputSize × inputSize并转换为模型输入格式。
     /// @return 与regions顺序一致的输入及还原信息；regions须为原图内有效区域。
     std::vector<YOLOPreProcessResult> PreProcess(const cv::Mat& image, const std::vector<cv::Rect>& regions);
 

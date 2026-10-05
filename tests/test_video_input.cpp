@@ -1,5 +1,6 @@
 #include "Acquisition/VideoInput.h"
 #include "Acquisition/AcquireFrame.h"
+#include "common/DartConfig.h"
 
 #include <atomic>
 #include <filesystem>
@@ -25,17 +26,6 @@ void expectError(const std::function<void()>& action, const std::string& fragmen
         return;
     }
     throw std::runtime_error("Expected an error containing: " + fragment);
-}
-
-void writeConfig(const std::filesystem::path& path, const std::string& left,
-                 const std::string& right, int repeat = 1, int capacity = 2,
-                 const std::string& mode = "images")
-{
-    cv::FileStorage file(path.string(), cv::FileStorage::WRITE);
-    require(file.isOpened(), "Cannot write fixture configuration");
-    file << "mode" << mode << "left_camera" << "{" << "path" << left << "}"
-         << "right_camera" << "{" << "path" << right << "}"
-         << "queue_capacity" << capacity << "repeat" << repeat;
 }
 
 // 模拟未来解码器反复覆盖同一块 Mat 缓冲区，第三次读取后结束。
@@ -89,9 +79,10 @@ void testImages(const std::filesystem::path& dir)
             "Cannot write left fixture");
     require(cv::imwrite((dir / "right.png").string(), cv::Mat(5, 6, CV_8UC4, cv::Scalar(10, 20, 30, 40))),
             "Cannot write right fixture");
-    const auto path = dir / "input.yaml";
-    writeConfig(path, "left.png", (dir / "right.png").string());
-    VideoInput input(path.string());
+    // 采集测试直接构造输入参数；YAML 解析与路径解析由配置模块测试覆盖。
+    const InputParams config{InputMode::Image, (dir / "left.png").string(),
+                             (dir / "right.png").string()};
+    VideoInput input(config, 2, true);
     require(!input.frameQueue().GetFrame(), "Empty queue returned a valid result");
     for (int i = 0; i < 3; ++i) require(input.captureNext(), "Repeat mode ended");
     require(input.queuedPairs() == 2, "Queue exceeded capacity");
@@ -115,30 +106,27 @@ void testImages(const std::filesystem::path& dir)
     pair = input.frameQueue().GetFrame();
     require(!pair, "Empty result retained a previously returned pair");
 
-    writeConfig(path, "left.png", "right.png", 0, 1);
-    VideoInput once(path.string());
+    VideoInput once(config, 1); // 默认单次采集
     require(once.captureNext() && !once.captureNext() && once.queuedPairs() == 1,
             "Single-pair mode failed");
     require(once.frameQueue().GetFrame().has_value() && !once.frameQueue().GetFrame(),
             "Single-pair drain failed");
 
-    for (const int capacity : {0, -1}) {
-        writeConfig(path, "left.png", "right.png", 1, capacity);
-        expectError([&] { VideoInput bad(path.string()); }, "queue_capacity");
-    }
-    writeConfig(path, "left.png", "right.png", 2);
-    expectError([&] { VideoInput bad(path.string()); }, "repeat");
-    writeConfig(path, "", "right.png");
-    expectError([&] { VideoInput bad(path.string()); }, "left_camera.path");
-    writeConfig(path, "left.png", "missing.png");
-    expectError([&] { VideoInput bad(path.string()); }, "right_camera.path");
-    writeConfig(path, "left.png", "right.png", 1, 2, "unknown");
-    expectError([&] { VideoInput bad(path.string()); }, "mode");
-    writeConfig(path, "left.png", "right.png", 1, 2, "video");
-    expectError([&] { VideoInput bad(path.string()); }, "not implemented");
-    expectError([&] { VideoInput bad((dir / "missing.yaml").string()); }, "missing.yaml");
-    // 留下可供主程序冒烟验证的有效配置。
-    writeConfig(path, "left.png", "right.png");
+    expectError([&] { VideoInput bad(config, 0); }, "capacity");
+    auto missingImage = config;
+    missingImage.rightPath = (dir / "missing.png").string();
+    expectError([&] { VideoInput bad(missingImage, 2); }, "input.right_path");
+    auto emptyPath = config;
+    emptyPath.leftPath.clear();
+    expectError([&] { VideoInput bad(emptyPath, 2); }, "input.left_path");
+
+    // 模式支持检查集中在数据源工厂，直接构造采集模块也会得到明确错误。
+    InputParams camera;
+    camera.mode = InputMode::Camera;
+    expectError([&] { VideoInput bad(camera, 2); }, "camera acquisition backend");
+    auto video = config;
+    video.mode = InputMode::Video;
+    expectError([&] { VideoInput bad(video, 2); }, "not implemented");
 }
 
 void testQueue()

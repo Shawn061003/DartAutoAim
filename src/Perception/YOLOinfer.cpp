@@ -15,16 +15,8 @@
 
 namespace {
 
-// TODO 后续这些放入config
-// 第一版直接在此选择左相机整图/四切，不按分辨率自动切换。
+// 当前取图策略保持左图四切、右图整图。
 constexpr bool kLeftUseTiles = true;
-constexpr int kInputSize = 512;
-constexpr int kTileOverlap = 30;
-constexpr int kLeftPadding = 25;
-constexpr int kRightPadding = 10;
-constexpr float kConfidenceThreshold = 0.25F;
-constexpr float kNmsThreshold = 0.45F;
-constexpr int kWarmupCount = 3;
 constexpr std::array<std::size_t, 2> kBatchSizes{1, 4};
 
 void CheckFrame(const cv::Mat& image)
@@ -35,21 +27,21 @@ void CheckFrame(const cv::Mat& image)
     }
 }
 
-std::vector<cv::Rect> MakeRegions(const cv::Size& size, bool useTiles)
+std::vector<cv::Rect> MakeRegions(const cv::Size& size, bool useTiles, int overlap)
 {
     // 整图模式只生成一个覆盖原图的区域。
     if (!useTiles) {
         return {cv::Rect(0, 0, size.width, size.height)};
     }
-    if (size.width <= kTileOverlap || size.height <= kTileOverlap) {
-        throw std::invalid_argument("Four-tile input must be larger than the 30px overlap.");
+    if (size.width <= overlap || size.height <= overlap) {
+        throw std::invalid_argument("Four-tile input width/height must exceed yolo.tile_overlap_px.");
     }
 
-    // 中线两侧各延伸15px，按左上、右上、左下、右下排列。
-    const int leftEnd = size.width / 2 + kTileOverlap / 2;
-    const int rightStart = leftEnd - kTileOverlap;
-    const int topEnd = size.height / 2 + kTileOverlap / 2;
-    const int bottomStart = topEnd - kTileOverlap;
+    // 按配置宽度分配中线两侧重叠，奇数像素余量落在右/下侧。
+    const int leftEnd = size.width / 2 + overlap / 2;
+    const int rightStart = leftEnd - overlap;
+    const int topEnd = size.height / 2 + overlap / 2;
+    const int bottomStart = topEnd - overlap;
     return {
         cv::Rect(0, 0, leftEnd, topEnd),
         cv::Rect(rightStart, 0, size.width - rightStart, topEnd),
@@ -66,10 +58,21 @@ struct YOLOInference::ModelRuntime {
     std::array<ov::InferRequest, 2> requests;
 };
 
-YOLOInference::YOLOInference(const std::string& modelPath, const std::string& device)
+YOLOInference::YOLOInference(const YOLOParams& params) : params_(params)
 {
-    // 构造时完成加载和预热，后续帧复用同一份资源。
-    LoadYOLOModule(modelPath, device);
+    // 构造时校验参数、加载并预热，后续帧复用同一份资源。
+    params_.validate();
+    LoadYOLOModule(params_.modelPath, params_.device);
+}
+
+YOLOInference::YOLOInference(const std::string& modelPath, const std::string& device)
+    : YOLOInference([&] {
+        YOLOParams params;
+        params.modelPath = modelPath;
+        params.device = device;
+        return params;
+    }())
+{
 }
 
 // ModelRuntime随对象析构，自动释放模型和推理请求。
@@ -85,9 +88,9 @@ void YOLOInference::LoadYOLOModule(const std::string& modelPath, const std::stri
     }
     const auto shape = original->input().get_partial_shape();
     if (shape.rank().is_dynamic() || shape.rank().get_length() != 4
-        || !shape[1].compatible(3) || !shape[2].compatible(kInputSize)
-        || !shape[3].compatible(kInputSize)) {
-        throw std::runtime_error("YOLO model input must support NCHW [B,3,512,512].");
+        || !shape[1].compatible(3) || !shape[2].compatible(params_.inputSize)
+        || !shape[3].compatible(params_.inputSize)) {
+        throw std::runtime_error("YOLO model input must support NCHW [B,3,input_size,input_size]; check yolo.input_size.");
     }
     const auto type = original->input().get_element_type();
     if (type != ov::element::f32 && type != ov::element::f16) {
@@ -99,7 +102,7 @@ void YOLOInference::LoadYOLOModule(const std::string& modelPath, const std::stri
         const std::size_t batch = kBatchSizes[slot];
         auto model = original->clone();
         model->reshape(ov::PartialShape{static_cast<std::int64_t>(batch), 3,
-                                       kInputSize, kInputSize});
+                                       params_.inputSize, params_.inputSize});
 
         // 统一对外使用FP32张量，模型内部所需的精度转换交给OpenVINO。
         ov::preprocess::PrePostProcessor processor(model);
@@ -120,7 +123,7 @@ void YOLOInference::LoadYOLOModule(const std::string& modelPath, const std::stri
         // 用零输入预热，初始化时确认单类别RAW输出[B,5,N]。
         auto input = runtime->requests[slot].get_input_tensor();
         std::fill_n(input.data<float>(), input.get_size(), 0.0F);
-        for (int i = 0; i < kWarmupCount; ++i) {
+        for (int i = 0; i < params_.warmupCount; ++i) {
             runtime->requests[slot].infer();
         }
         const auto outputShape = runtime->requests[slot].get_output_tensor().get_shape();
@@ -139,21 +142,21 @@ std::vector<YOLOInference::YOLOPreProcessResult> YOLOInference::PreProcess(
     std::vector<YOLOPreProcessResult> results;
     results.reserve(regions.size());
     for (const auto& region : regions) {
-        // 1. 按长边缩放到512，短边尺寸取整后居中放置。
-        const double scale = std::min(static_cast<double>(kInputSize) / region.width,
-                                      static_cast<double>(kInputSize) / region.height);
+        // 1. 按长边缩放到配置的输入边长，短边尺寸取整后居中放置。
+        const double scale = std::min(static_cast<double>(params_.inputSize) / region.width,
+                                      static_cast<double>(params_.inputSize) / region.height);
         const int width = std::clamp(static_cast<int>(std::round(region.width * scale)),
-                                     1, kInputSize);
+                                     1, params_.inputSize);
         const int height = std::clamp(static_cast<int>(std::round(region.height * scale)),
-                                      1, kInputSize);
-        const int left = (kInputSize - width) / 2;
-        const int top = (kInputSize - height) / 2;
+                                      1, params_.inputSize);
+        const int left = (params_.inputSize - width) / 2;
+        const int top = (params_.inputSize - height) / 2;
         // 2. 裁出当前区域并缩放，空白区域按YOLO约定填充114。
         cv::Mat resized;
         cv::resize(image(region), resized, cv::Size(width, height), 0, 0, cv::INTER_LINEAR);
         cv::Mat letterbox;
-        cv::copyMakeBorder(resized, letterbox, top, kInputSize - height - top,
-                           left, kInputSize - width - left, cv::BORDER_CONSTANT,
+        cv::copyMakeBorder(resized, letterbox, top, params_.inputSize - height - top,
+                           left, params_.inputSize - width - left, cv::BORDER_CONSTANT,
                            cv::Scalar(114, 114, 114));
 
         // 3. 保存取图原点、实际缩放比例和padding，供后处理还原坐标。
@@ -162,7 +165,7 @@ std::vector<YOLOInference::YOLOPreProcessResult> YOLOInference::PreProcess(
         result.scale_x = static_cast<double>(width) / region.width;
         result.scale_y = static_cast<double>(height) / region.height;
         result.padding = cv::Point(left, top);
-        // 4. BGR转RGB并归一化至[0,1]，排列为[1,3,512,512]。
+        // 4. BGR转RGB并归一化至[0,1]，排列为[1,3,inputSize,inputSize]。
         result.input = cv::dnn::blobFromImage(letterbox, 1.0 / 255.0, cv::Size(),
                                              cv::Scalar(), true, false, CV_32F);
         results.push_back(std::move(result));
@@ -177,7 +180,7 @@ YOLOInference::YOLOBatchResult YOLOInference::YOLOInfer(
     const std::size_t slot = inputs.size() == 1 ? 0 : 1;
     auto& request = model_runtime_->requests[slot];
     auto tensor = request.get_input_tensor();
-    constexpr std::size_t imageElements = 3 * kInputSize * kInputSize;
+    const std::size_t imageElements = 3 * static_cast<std::size_t>(params_.inputSize) * params_.inputSize;
     float* destination = tensor.data<float>();
     for (std::size_t i = 0; i < inputs.size(); ++i) {
         const cv::Mat& input = inputs[i].input;
@@ -206,7 +209,7 @@ YOLOInference::YOLOBatchResult YOLOInference::YOLOInfer(
             const float x = values[i] - width * 0.5F;
             const float y = values[count + i] - height * 0.5F;
             // 过滤低分、非有限数值和无效尺寸，留下可用的检测框。
-            if (!std::isfinite(confidence) || confidence <= kConfidenceThreshold
+            if (!std::isfinite(confidence) || confidence <= params_.confidenceThreshold
                 || confidence > 1.0F || !std::isfinite(x) || !std::isfinite(y)
                 || !std::isfinite(width) || !std::isfinite(height)
                 || width <= 0.0F || height <= 0.0F) {
@@ -253,7 +256,7 @@ YOLOInference::YOLOResults YOLOInference::PostProcess(
 
     // 2. 跨切块执行NMS，去除重叠区域重复检出的目标。
     std::vector<int> kept;
-    cv::dnn::NMSBoxes(boxes, scores, kConfidenceThreshold, kNmsThreshold, kept);
+    cv::dnn::NMSBoxes(boxes, scores, params_.confidenceThreshold, params_.nmsIouThreshold, kept);
     // 3. 优先保留最高分框，再找与它无交集的最高分框；最多取两个。
     std::stable_sort(kept.begin(), kept.end(),
         [&scores](int a, int b) { return scores[a] > scores[b]; });
@@ -291,20 +294,20 @@ YOLOInference::StereoYOLOResult YOLOInference::RunYOLOInfer(
 
     // 2. 左相机按固定模式完成取图、预处理、推理和ROI生成。
     const auto leftInputs = PreProcess(leftFrame.image,
-                                       MakeRegions(leftFrame.image.size(), kLeftUseTiles));
+                                       MakeRegions(leftFrame.image.size(), kLeftUseTiles, params_.tileOverlapPx));
     const auto leftBatch = YOLOInfer(leftInputs);
     StereoYOLOResult result;
-    result.left = PostProcess(leftBatch, leftInputs, leftFrame, kLeftPadding);
+    result.left = PostProcess(leftBatch, leftInputs, leftFrame, params_.leftPaddingPx);
     // 3. 仅当四块均无有效候选时，再对左相机整图推理一次。
     const bool noTileCandidates = std::all_of(leftBatch.detections.begin(), leftBatch.detections.end(),
         [](const auto& detections) { return detections.empty(); });
     if (kLeftUseTiles && noTileCandidates) {
-        const auto fullInput = PreProcess(leftFrame.image, MakeRegions(leftFrame.image.size(), false));
-        result.left = PostProcess(YOLOInfer(fullInput), fullInput, leftFrame, kLeftPadding);
+        const auto fullInput = PreProcess(leftFrame.image, MakeRegions(leftFrame.image.size(), false, params_.tileOverlapPx));
+        result.left = PostProcess(YOLOInfer(fullInput), fullInput, leftFrame, params_.leftPaddingPx);
     }
 
     // 4. 右相机始终整图推理，与左相机独立选择最多两个目标。
-    const auto rightInput = PreProcess(rightFrame.image, MakeRegions(rightFrame.image.size(), false));
-    result.right = PostProcess(YOLOInfer(rightInput), rightInput, rightFrame, kRightPadding);
+    const auto rightInput = PreProcess(rightFrame.image, MakeRegions(rightFrame.image.size(), false, params_.tileOverlapPx));
+    result.right = PostProcess(YOLOInfer(rightInput), rightInput, rightFrame, params_.rightPaddingPx);
     return result;
 }
