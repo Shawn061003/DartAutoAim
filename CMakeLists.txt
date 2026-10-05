@@ -23,10 +23,10 @@ target_include_directories(dart_mcu_protocol INTERFACE
 )
 target_compile_features(dart_mcu_protocol INTERFACE cxx_std_17)
 
-# 主程序：相机配置加载；采集、感知和解算模块实现后在此显式添加源文件。
+# 主程序：相机配置加载及文件采集；感知和解算流水线后续接入。
 if(DART_BUILD_MAIN)
-    # FileStorage 与 Mat 均由 OpenCV core 提供，依赖随主程序开关启用。
-    find_package(OpenCV REQUIRED COMPONENTS core)
+    find_package(OpenCV REQUIRED COMPONENTS core imgcodecs)
+    find_package(Threads REQUIRED)
 
     # 配置模块提供 dart::config 别名，供调用方通过 target_link_libraries 引用。
     # PUBLIC 使调用方同时获得配置头文件所需的 OpenCV 头文件路径及链接依赖。
@@ -39,8 +39,28 @@ if(DART_BUILD_MAIN)
     target_link_libraries(dart_config PUBLIC ${OpenCV_LIBS})
     target_compile_features(dart_config PUBLIC cxx_std_17)
 
+    add_library(dart_acquisition
+        src/Acquisition/AcquireFrame.cpp
+        src/Acquisition/VideoInput.cpp
+    )
+    add_library(dart::acquisition ALIAS dart_acquisition)
+    target_include_directories(dart_acquisition PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/include ${OpenCV_INCLUDE_DIRS}
+    )
+    target_link_libraries(dart_acquisition PUBLIC opencv_core Threads::Threads PRIVATE opencv_imgcodecs)
+    target_compile_options(dart_acquisition PRIVATE -Wall -Wextra -Wpedantic)
+
     add_executable(dart_vision src/main.cpp)
-    target_link_libraries(dart_vision PRIVATE dart::config dart::mcu_protocol)
+    target_link_libraries(dart_vision PRIVATE dart::config dart::mcu_protocol dart::acquisition)
+
+    if(BUILD_TESTING)
+        add_executable(dart_video_input_test tests/test_video_input.cpp)
+        target_link_libraries(dart_video_input_test PRIVATE dart::acquisition opencv_imgcodecs)
+        target_compile_options(dart_video_input_test PRIVATE -Wall -Wextra -Wpedantic)
+        add_test(NAME video_input COMMAND dart_video_input_test
+            ${CMAKE_CURRENT_BINARY_DIR}/video_input_fixtures)
+    endif()
+    # video.yaml 的媒体路径相对于源 YAML；不复制，以免改变相对路径含义。
 
     # 支持以构建目录为工作目录运行；源配置变化后 CMake 会同步副本。
     configure_file(config/dart.yaml config/dart.yaml COPYONLY)
