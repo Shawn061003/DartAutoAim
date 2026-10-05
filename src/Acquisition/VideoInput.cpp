@@ -66,6 +66,8 @@ bool VideoInput::captureNext()
     if (exhausted_) return false;
     // 入队前即使用完整 CameraFrame；队列直接保存该类型，出队不重建元数据。
     CameraFrame left, right;
+    left.camera_side = CameraSide::Left;
+    right.camera_side = CameraSide::Right;
     if (!source_->readNext(left.image, right.image)) {
         exhausted_ = true;
         return false;

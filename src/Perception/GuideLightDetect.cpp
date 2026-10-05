@@ -13,7 +13,8 @@
 #include <utility>
 
 GuideLightDetect::GuideLightDetect(const GuideLightParams& params)
-    : hsv_lower_(params.hsvLower), hsv_upper_(params.hsvUpper)
+    : right_hsv_lower_(params.rightHsvLower), right_hsv_upper_(params.rightHsvUpper),
+      left_hsv_lower_(params.leftHsvLower), left_hsv_upper_(params.leftHsvUpper)
 {
     params.validate();
 }
@@ -22,16 +23,21 @@ GuideLightDetect::StereoDetectResult GuideLightDetect::RunDetection(
     const CameraFrame& leftFrame, const CameraFrame& rightFrame,
     const YOLOInference::StereoYOLOResult& result)
 {
+    if (leftFrame.camera_side != CameraSide::Left || rightFrame.camera_side != CameraSide::Right)
+        throw std::invalid_argument("GuideLightDetect requires Left/Right camera_side on the corresponding frames");
     const auto detectFrame = [this](const CameraFrame& frame,
                                    const YOLOInference::YOLOResults& targets) {
         DetectResult detections;
         detections.reserve(targets.size());
         for (const auto& target : targets) {
+            if (target.camera_side != frame.camera_side)
+                throw std::invalid_argument("YOLO result camera_side does not match its CameraFrame");
             GuideLightDetectResult detection;
             detection.roi = target.roi;
             detection.frame_id = frame.frame_id;
             detection.timestamp_ms = frame.timestamp_ms;
-            detection.contours = GetContours(frame.image, target.roi);
+            detection.camera_side = frame.camera_side;
+            detection.contours = GetContours(frame.image, target.roi, frame.camera_side);
             detection.CenterPoint = GetCenterPoint(detection.contours);
             if (std::isfinite(detection.CenterPoint.x)
                 && std::isfinite(detection.CenterPoint.y)) {
@@ -50,12 +56,14 @@ GuideLightDetect::StereoDetectResult GuideLightDetect::RunDetection(
 }
 
 std::vector<cv::Point2f> GuideLightDetect::GetContours(
-    const cv::Mat& image, const cv::Rect& roi)
+    const cv::Mat& image, const cv::Rect& roi, CameraSide side)
 {
     // 1. 在ROI内进行HSV筛选，得到高亮绿色区域的二值掩膜。
     cv::Mat hsv, mask;
     cv::cvtColor(image(roi), hsv, cv::COLOR_BGR2HSV);
-    cv::inRange(hsv, hsv_lower_, hsv_upper_, mask);
+    const auto& lower = side == CameraSide::Left ? left_hsv_lower_ : right_hsv_lower_;
+    const auto& upper = side == CameraSide::Left ? left_hsv_upper_ : right_hsv_upper_;
+    cv::inRange(hsv, lower, upper, mask);
 
     // 2. 只提取外轮廓，保留全部边界像素，供后续中心估计使用。
     std::vector<std::vector<cv::Point>> candidates;

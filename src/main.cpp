@@ -90,7 +90,7 @@ int runImageMode(const DartCongfig& config)
     const auto detections = processFrame(*frame, yolo, guideLight);
     std::cout << "Visual detection completed: left_frame=" << frame->left.frame_id
               << " right_frame=" << frame->right.frame_id << '\n';
-    // 单对图片等待按键或关闭检测窗口；未来连续帧模式使用默认的短暂刷新。
+    // 单对图片等待按键；GTK3 下也可关闭所有可视化窗口；未来连续帧模式使用默认的短暂刷新。
     GuideLightDetectVisualize::Show(
         makeGuideLightVisualize(frame->left, detections.left),
         makeGuideLightVisualize(frame->right, detections.right), 0);

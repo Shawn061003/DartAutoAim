@@ -4,6 +4,7 @@
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <regex>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -55,7 +56,13 @@ int main(int argc, char** argv)
             require(output.good(), "Cannot write fixture");
         };
         DartCongfig config(source.string());
-        require(config.input.mode == InputMode::Camera, "Camera preset mode changed");
+        // 本地配置可能已被用户切换为image模式；测试自身构造camera夹具。
+        auto camera = std::regex_replace(original, std::regex(R"rx(mode:\s*"[^"]*")rx"), "mode: \"camera\"");
+        camera = std::regex_replace(camera, std::regex(R"rx(left_path:\s*"[^"]*")rx"), "left_path: \"\"");
+        camera = std::regex_replace(camera, std::regex(R"rx(right_path:\s*"[^"]*")rx"), "right_path: \"\"");
+        write(camera);
+        config.load(fixture.string());
+        require(config.input.mode == InputMode::Camera, "Camera mode incorrect");
         require(config.frameQueue.capacity == 4 && config.frameQueue.maxTimestampDiffMs == 5,
                 "Queue defaults changed");
         const auto root = source.parent_path().parent_path();
@@ -63,7 +70,7 @@ int main(int argc, char** argv)
         checkCalibration(config.rightCamera, root / "CalibrationResults/MV-CS016-10GC_final/intrinsics.yaml");
 
         // image 模式按 YAML 目录解析媒体与模型；配置数值原样传给各模块。
-        auto image = replace(original, "mode: \"camera\"", "mode: \"image\"");
+        auto image = replace(camera, "mode: \"camera\"", "mode: \"image\"");
         image = replace(image, "left_path: \"\"", "left_path: \"left.png\"");
         image = replace(image, "right_path: \"\"", "right_path: \"right.png\"");
         image = replace(image, "capacity: 4", "capacity: 7");
@@ -75,7 +82,8 @@ int main(int argc, char** argv)
         image = replace(image, "confidence_threshold: 0.25", "confidence_threshold: 0.5");
         image = replace(image, "nms_iou_threshold: 0.45", "nms_iou_threshold: 0.75");
         image = replace(image, "warmup_count: 3", "warmup_count: 1");
-        image = replace(image, "[60, 102, 81]", "[50, 100, 80]");
+        image = replace(image, "right_hsv_lower: [60, 102, 81]", "right_hsv_lower: [50, 100, 80]");
+        image = replace(image, "left_hsv_lower: [61, 210, 140]", "left_hsv_lower: [62, 211, 141]");
         write(image);
         config.load(fixture.string());
         require(config.input.mode == InputMode::Image &&
@@ -88,7 +96,10 @@ int main(int argc, char** argv)
                 config.yolo.tileOverlapPx == 7 && config.yolo.leftPaddingPx == 2 &&
                 config.yolo.rightPaddingPx == 3 && config.yolo.confidenceThreshold == 0.5F &&
                 config.yolo.nmsIouThreshold == 0.75F && config.yolo.warmupCount == 1 &&
-                config.guideLight.hsvLower == cv::Scalar(50, 100, 80), "Configuration options were ignored");
+                config.guideLight.rightHsvLower == cv::Scalar(50, 100, 80)
+                && config.guideLight.leftHsvLower == cv::Scalar(62, 211, 141)
+                && config.guideLight.rightHsvUpper == cv::Scalar(86, 212, 255)
+                && config.guideLight.leftHsvUpper == cv::Scalar(74, 230, 240), "Configuration options were ignored");
         write(replace(image, "mode: \"image\"", "mode: \"video\""));
         require(DartCongfig(fixture.string()).input.mode == InputMode::Video,
                 "Video mode incorrect");
@@ -116,9 +127,13 @@ int main(int argc, char** argv)
             {"confidence_threshold: 0.5", "confidence_threshold: .Nan"},
             {"nms_iou_threshold: 0.75", "nms_iou_threshold: 1.1"},
             {"warmup_count: 1", "warmup_count: 0"},
-            {"hsv_lower: [50, 100, 80]", "hsv_lower: [180, 100, 80]"},
-            {"hsv_upper: [86, 212, 255]", "hsv_upper: [40, 212, 255]"},
-            {"hsv_upper: [86, 212, 255]", "hsv_upper: [86, 212]"},
+            {"right_hsv_lower: [50, 100, 80]", "right_hsv_lower: [180, 100, 80]"},
+            {"right_hsv_upper: [86, 212, 255]", "right_hsv_upper: [40, 212, 255]"},
+            {"right_hsv_upper: [86, 212, 255]", "right_hsv_upper: [86, 212]"},
+            {"left_hsv_lower: [62, 211, 141]", "left_hsv_lower: [62, 211]"},
+            {"left_hsv_upper: [74, 230, 240]", "left_hsv_upper: [74, 256, 240]"},
+            {"left_hsv_upper: [74, 230, 240]", "left_hsv_upper: [60, 230, 240]"},
+            {"left_hsv_lower:", "missing_left_hsv_lower:"},
             {"exposure_us: 0.", "exposure_us: -1."},
             {"image_height: 3648", "image_height: 2.5"},
             {"cameras:", "missing_cameras:"},
@@ -136,7 +151,10 @@ int main(int argc, char** argv)
             require(rejected, "Invalid setting accepted: " + error.second);
             require(config.input.mode == InputMode::Image && config.yolo.inputSize == 256 &&
                     config.frameQueue.capacity == 7 && config.leftCamera.height == 3648 &&
-                    config.guideLight.hsvLower == cv::Scalar(50, 100, 80), "Failed reload changed configuration");
+                    config.guideLight.rightHsvLower == cv::Scalar(50, 100, 80)
+                && config.guideLight.leftHsvLower == cv::Scalar(62, 211, 141)
+                && config.guideLight.rightHsvUpper == cv::Scalar(86, 212, 255)
+                && config.guideLight.leftHsvUpper == cv::Scalar(74, 230, 240), "Failed reload changed configuration");
         }
         write(image);
         std::cout << "Five-section config, calibration, path and " << errors.size()

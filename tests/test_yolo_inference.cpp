@@ -83,13 +83,14 @@ void GenerateFixtures(const std::filesystem::path& path)
 
 
 void Expect(const YOLOInference::YOLOResults& results,
-            const cv::Rect& roi, std::uint64_t frame, std::int64_t timestamp, std::size_t index = 0)
+            const cv::Rect& roi, std::uint64_t frame, std::int64_t timestamp, CameraSide side, std::size_t index = 0)
 {
     Require(results.size() > index && results.size() <= 2, "Unexpected detection count.");
     const auto& result = results[index];
     Require(result.roi == roi, "Unexpected ROI: " + std::to_string(result.roi.x)
         + "," + std::to_string(result.roi.y) + "," + std::to_string(result.roi.width)
         + "," + std::to_string(result.roi.height));
+    Require(result.camera_side == side, "Camera side was lost during YOLO postprocessing.");
     Require(result.frame_id == frame && result.timestamp_ms == timestamp,
             "Frame metadata was not preserved.");
 }
@@ -104,8 +105,8 @@ int main(int argc, char** argv)
         const std::filesystem::path models(argv[1]);
         GenerateFixtures(models);
         YOLOInference detector((models / "raw.xml").string(), "CPU");
-        CameraFrame right{cv::Mat(512, 512, CV_8UC3, cv::Scalar(0, 0, 255)), 7, 1234};
-        CameraFrame left{cv::Mat(), 9, 1235};
+        CameraFrame right{cv::Mat(512, 512, CV_8UC3, cv::Scalar(0, 0, 255)), 7, 1234, CameraSide::Right};
+        CameraFrame left{cv::Mat(), 9, 1235, CameraSide::Left};
 
         // 994切成四张512，单独点亮每个象限，验证四个batch位置和482px偏移。
         for (int quadrant = 0; quadrant < 4; ++quadrant) {
@@ -115,21 +116,31 @@ int main(int argc, char** argv)
             left.image(cv::Rect(x, y, 497, 497)).setTo(cv::Scalar(0, 0, 255));
             const auto result = detector.RunYOLOInfer(left, right);
             Expect(result.left, cv::Rect(221 + quadrant % 2 * 482,
-                                         221 + quadrant / 2 * 482, 70, 70), 9, 1235);
-            Expect(result.right, cv::Rect(236, 236, 40, 40), 7, 1234);
+                                         221 + quadrant / 2 * 482, 70, 70), 9, 1235, CameraSide::Left);
+            Expect(result.right, cv::Rect(236, 236, 40, 40), 7, 1234, CameraSide::Right);
+        }
+
+        // 来源未标明或把左帧当右帧传入时，在推理之前拒绝。
+        for (const auto side : {CameraSide::Unknown, CameraSide::Left}) {
+            auto invalid = right;
+            invalid.camera_side = side;
+            bool rejected = false;
+            try { detector.RunYOLOInfer(left, invalid); }
+            catch (const std::invalid_argument&) { rejected = true; }
+            Require(rejected, "YOLO accepted an unknown or mismatched camera side.");
         }
 
         // 非方形输入含padding；像素均值也能检查114填充值、归一化和RGB顺序。
         right.image = cv::Mat(384, 512, CV_8UC3, cv::Scalar(0, 0, 255));
         auto result = detector.RunYOLOInfer(left, right);
-        Expect(result.right, cv::Rect(236, 172, 40, 40), 7, 1234);
+        Expect(result.right, cv::Rect(236, 172, 40, 40), 7, 1234, CameraSide::Right);
         Require(std::abs(result.right.front().conf - (0.75 + 0.25 * 114.0 / 255.0)) < 0.01,
                 "Letterbox pixels or normalization are incorrect.");
 
         // 非连续Mat也可作为输入；每次请求必须覆盖上一次的tensor。
         cv::Mat backing(514, 514, CV_8UC3, cv::Scalar(0, 0, 255));
         right.image = backing(cv::Rect(1, 1, 512, 512));
-        Expect(detector.RunYOLOInfer(left, right).right, cv::Rect(236, 236, 40, 40), 7, 1234);
+        Expect(detector.RunYOLOInfer(left, right).right, cv::Rect(236, 236, 40, 40), 7, 1234, CameraSide::Right);
         right.image.setTo(cv::Scalar(255, 0, 0));
         Require(detector.RunYOLOInfer(left, right).right.empty(), "BGR/RGB mapping is incorrect.");
 
@@ -139,7 +150,7 @@ int main(int argc, char** argv)
         left.image(cv::Rect(0, 0, 497, 994)).setTo(cv::Scalar(0, 0, 255));
         right.image = cv::Mat::zeros(512, 512, CV_8UC3);
         result = fallback.RunYOLOInfer(left, right);
-        Expect(result.left, cv::Rect(452, 452, 90, 90), 9, 1235);
+        Expect(result.left, cv::Rect(452, 452, 90, 90), 9, 1235, CameraSide::Left);
         Require(result.right.empty(), "Blank right image should have no detection.");
 
         // 负坐标框外扩后仍须裁至图像边界。
@@ -147,24 +158,24 @@ int main(int argc, char** argv)
         left.image = cv::Mat(994, 994, CV_8UC3, cv::Scalar(0, 0, 255));
         right.image = cv::Mat(512, 512, CV_8UC3, cv::Scalar(0, 0, 255));
         result = edge.RunYOLOInfer(left, right);
-        Expect(result.left, cv::Rect(0, 0, 40, 40), 9, 1235);
-        Expect(result.right, cv::Rect(0, 0, 25, 25), 7, 1234);
+        Expect(result.left, cv::Rect(0, 0, 40, 40), 9, 1235, CameraSide::Left);
+        Expect(result.right, cv::Rect(0, 0, 25, 25), 7, 1234, CameraSide::Right);
 
         // 三个分离目标只保留最高分的两个，输出顺序不依赖模型行顺序。
         left.image.setTo(cv::Scalar());
         YOLOInference twoTargets((models / "two_targets.xml").string(), "CPU");
         result = twoTargets.RunYOLOInfer(left, right);
         Require(result.left.empty() && result.right.size() == 2, "Expected exactly two right targets.");
-        Expect(result.right, cv::Rect(364, 364, 40, 40), 7, 1234, 0);
-        Expect(result.right, cv::Rect(108, 108, 40, 40), 7, 1234, 1);
+        Expect(result.right, cv::Rect(364, 364, 40, 40), 7, 1234, CameraSide::Right, 0);
+        Expect(result.right, cv::Rect(108, 108, 40, 40), 7, 1234, CameraSide::Right, 1);
         Require(result.right[0].conf > result.right[1].conf, "Results are not sorted by confidence.");
 
         // 完全重复框由NMS抑制；轻微重叠框虽通过NMS，也不能成为第二目标。
         YOLOInference overlapSkip((models / "overlap_skip.xml").string(), "CPU");
         result = overlapSkip.RunYOLOInfer(left, right);
         Require(result.right.size() == 2, "Expected a lower-score disjoint second target.");
-        Expect(result.right, cv::Rect(90, 90, 60, 60), 7, 1234, 0);
-        Expect(result.right, cv::Rect(290, 90, 40, 40), 7, 1234, 1);
+        Expect(result.right, cv::Rect(90, 90, 60, 60), 7, 1234, CameraSide::Right, 0);
+        Expect(result.right, cv::Rect(290, 90, 40, 40), 7, 1234, CameraSide::Right, 1);
 
         YOLOInference overlapOnly((models / "overlap_only.xml").string(), "CPU");
         result = overlapOnly.RunYOLOInfer(left, right);
@@ -174,8 +185,8 @@ int main(int argc, char** argv)
         YOLOInference touching((models / "touching.xml").string(), "CPU");
         result = touching.RunYOLOInfer(left, right);
         Require(result.right.size() == 2, "Touching boxes should both be retained.");
-        Expect(result.right, cv::Rect(90, 90, 40, 40), 7, 1234, 0);
-        Expect(result.right, cv::Rect(110, 90, 40, 40), 7, 1234, 1);
+        Expect(result.right, cv::Rect(90, 90, 40, 40), 7, 1234, CameraSide::Right, 0);
+        Expect(result.right, cv::Rect(110, 90, 40, 40), 7, 1234, CameraSide::Right, 1);
 
         YOLOInference tinyOverlap((models / "tiny_overlap.xml").string(), "CPU");
         Require(tinyOverlap.RunYOLOInfer(left, right).right.size() == 1,
@@ -183,14 +194,14 @@ int main(int argc, char** argv)
         YOLOInference keepBest((models / "keep_best.xml").string(), "CPU");
         result = keepBest.RunYOLOInfer(left, right);
         Require(result.right.size() == 1, "A disjoint lower-score pair must not replace the highest score.");
-        Expect(result.right, cv::Rect(90, 90, 100, 60), 7, 1234);
+        Expect(result.right, cv::Rect(90, 90, 100, 60), 7, 1234, CameraSide::Right);
 
         // 同一batch中不同切块的相同局部框，须在原图坐标下判断是否重叠。
         left.image.setTo(cv::Scalar(0, 0, 255));
         result = detector.RunYOLOInfer(left, right);
         Require(result.left.size() == 2 && result.right.size() == 1, "Per-camera counts are incorrect.");
-        Expect(result.left, cv::Rect(221, 221, 70, 70), 9, 1235, 0);
-        Expect(result.left, cv::Rect(703, 221, 70, 70), 9, 1235, 1);
+        Expect(result.left, cv::Rect(221, 221, 70, 70), 9, 1235, CameraSide::Left, 0);
+        Expect(result.left, cv::Rect(703, 221, 70, 70), 9, 1235, CameraSide::Left, 1);
 
 
         // 没有检测时不得返回上一次的ROI；空图须报错。
@@ -213,12 +224,12 @@ int main(int argc, char** argv)
         params.leftPaddingPx = 3;
         params.rightPaddingPx = 7;
         params.warmupCount = 1;
-        CameraFrame configuredLeft{cv::Mat(512, 512, CV_8UC3, cv::Scalar(0, 0, 255)), 5, 10};
-        CameraFrame configuredRight{cv::Mat(256, 256, CV_8UC3, cv::Scalar(0, 0, 255)), 6, 10};
+        CameraFrame configuredLeft{cv::Mat(512, 512, CV_8UC3, cv::Scalar(0, 0, 255)), 5, 10, CameraSide::Left};
+        CameraFrame configuredRight{cv::Mat(256, 256, CV_8UC3, cv::Scalar(0, 0, 255)), 6, 10, CameraSide::Right};
         YOLOInference configured(params);
         auto configuredResult = configured.RunYOLOInfer(configuredLeft, configuredRight);
-        Expect(configuredResult.left, cv::Rect(115, 115, 26, 26), 5, 10);
-        Expect(configuredResult.right, cv::Rect(111, 111, 34, 34), 6, 10);
+        Expect(configuredResult.left, cv::Rect(115, 115, 26, 26), 5, 10, CameraSide::Left);
+        Expect(configuredResult.right, cv::Rect(111, 111, 34, 34), 6, 10, CameraSide::Right);
 
         params.confidenceThreshold = 1.0F;
         YOLOInference filtered(params);
@@ -241,7 +252,7 @@ int main(int argc, char** argv)
         configuredRight.image = cv::Mat(512, 512, CV_8UC3, cv::Scalar(0, 0, 255));
         YOLOInference nmsConfigured(params);
         configuredResult = nmsConfigured.RunYOLOInfer(configuredLeft, configuredRight);
-        Expect(configuredResult.right, cv::Rect(160, 100, 40, 40), 6, 10, 1);
+        Expect(configuredResult.right, cv::Rect(160, 100, 40, 40), 6, 10, CameraSide::Right, 1);
         std::cout << "YOLO regression checks passed.\n";
         return 0;
     } catch (const std::exception& error) {

@@ -27,7 +27,7 @@ public:
 
     // 返回左右并排的 BGR 画布，便于无窗口测试或由调用方保存。
     static cv::Mat Draw(const FrameVisualize& left, const FrameVisualize& right);
-    // delay_ms > 0 时短暂刷新；0 时等待按键或关闭窗口。GUI 入口只在主线程调用。
+    // delay_ms > 0 时短暂刷新；0 时等待按键，GTK3 下关闭全部窗口也可结束等待。GUI 入口只在主线程调用。
     static void Show(const FrameVisualize& left, const FrameVisualize& right,
                      int delay_ms = 1);
 };
@@ -46,7 +46,7 @@ public:
         std::vector<TargetVisualize> targets;
     };
 
-    // 绿色轮廓/十字表示成功，橙色表示失败；失败项仅显示诊断轮廓，不绘制中心。
+    // 红色轮廓/十字表示成功，橙色表示失败；失败项仅显示诊断轮廓，不绘制中心。
     // 左右目标各自编号，编号相同不代表已完成双目关联。
     static cv::Mat Draw(const FrameVisualize& left, const FrameVisualize& right);
     static void Show(const FrameVisualize& left, const FrameVisualize& right,

@@ -14,9 +14,8 @@ constexpr int kHeaderHeight = 52;
 constexpr int kInsetWidth = 180;
 constexpr int kInsetHeight = 144;
 constexpr int kLabelHeight = 24;
-const cv::Scalar kGreen(60, 230, 80);
+const cv::Scalar kRed(0, 0, 255); // OpenCV 使用 BGR 顺序。
 const cv::Scalar kOrange(0, 170, 255);
-const cv::Scalar kBlue(255, 190, 60);
 const cv::Scalar kText(235, 235, 235);
 
 void label(cv::Mat& image, const std::string& text, cv::Point origin,
@@ -63,13 +62,13 @@ void drawTarget(cv::Mat& canvas, const YOLOInferenceVisualize::TargetVisualize& 
     if (roi.empty()) return;
     cv::rectangle(canvas, mapPoint(cv::Point2f(roi.tl()), source, destination),
                   mapPoint(cv::Point2f(roi.br() - cv::Point(1, 1)), source, destination),
-                  kBlue, 2, cv::LINE_AA);
+                  kRed, 2, cv::LINE_AA);
 }
 
 void drawTarget(cv::Mat& canvas, const GuideLightDetectVisualize::TargetVisualize& target,
                 const cv::Rect& source, const cv::Rect& destination)
 {
-    const auto color = target.success ? kGreen : kOrange;
+    const auto color = target.success ? kRed : kOrange;
     // 仅绘制有限且在当前图像范围内的点，防止失败结果中的 NaN 进入整数坐标。
     for (std::size_t i = 0; i < target.contours.size(); ++i) {
         const auto& a = target.contours[i];
@@ -80,7 +79,7 @@ void drawTarget(cv::Mat& canvas, const GuideLightDetectVisualize::TargetVisualiz
     }
     if (target.success && inside(target.center, source))
         cv::drawMarker(canvas, mapPoint(target.center, source, destination),
-                       kGreen, cv::MARKER_CROSS, 16, 2, cv::LINE_AA);
+                       kRed, cv::MARKER_CROSS, 16, 2, cv::LINE_AA);
 }
 
 std::string targetLabel(const YOLOInferenceVisualize::TargetVisualize& target)
@@ -166,13 +165,11 @@ void show(const char* title, const cv::Mat& canvas, int delay_ms)
         cv::waitKey(delay_ms);
         return;
     }
-    // 单对图片需保持窗口；轮询窗口关闭事件，避免关闭后仍永久等待按键。
-    while (cv::getWindowProperty(title, cv::WND_PROP_VISIBLE) >= 1.0) {
-        if (cv::waitKey(30) >= 0) {
-            cv::destroyWindow(title);
-            break;
-        }
-    }
+    // 图片模式由 HighGUI 处理事件并等待按键，保证窗口持续显示。
+    // GTK3 的 WND_PROP_VISIBLE 返回 -1，不能用该属性作为进入等待的条件。
+    // GTK3 也会在所有 HighGUI 窗口关闭后结束等待；此时返回值为 -1。
+    if (cv::waitKey(0) >= 0)
+        cv::destroyWindow(title);
 }
 } // namespace
 

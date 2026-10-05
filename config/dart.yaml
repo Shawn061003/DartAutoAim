@@ -73,7 +73,9 @@ yolo:
    nms_iou_threshold: 0.45
    warmup_count: 3           # 每套 batch 请求的预热次数，至少 1
 
-# 左右相机共用 HSV 阈值；H: 0..179，S/V: 0..255，包含上下界。
+# 左右相机分别设置 HSV 阈值；H: 0..179，S/V: 0..255，包含上下界。
 guide_light:
-   hsv_lower: [60, 102, 81]
-   hsv_upper: [86, 212, 255]
+   right_hsv_lower: [60, 102, 81]
+   right_hsv_upper: [86, 212, 255]
+   left_hsv_lower: [61, 210, 140]
+   left_hsv_upper: [74, 230, 240]

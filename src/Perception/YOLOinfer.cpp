@@ -277,7 +277,7 @@ YOLOInference::YOLOResults YOLOInference::PostProcess(
         const int y2 = static_cast<int>(std::ceil(
             std::min(static_cast<double>(frame.image.rows), box.y + box.height + roiPadding)));
         results.push_back({cv::Rect(x1, y1, x2 - x1, y2 - y1), scores[index],
-                           frame.frame_id, frame.timestamp_ms});
+                           frame.frame_id, frame.timestamp_ms, frame.camera_side});
         if (results.size() == 2) {
             break;
         }
@@ -289,6 +289,8 @@ YOLOInference::StereoYOLOResult YOLOInference::RunYOLOInfer(
     const CameraFrame& leftFrame, const CameraFrame& rightFrame)
 {
     // 1. 检查两路输入；时间配对由上游采集模块完成。
+    if (leftFrame.camera_side != CameraSide::Left || rightFrame.camera_side != CameraSide::Right)
+        throw std::invalid_argument("YOLO requires Left/Right camera_side on the corresponding input frames");
     CheckFrame(leftFrame.image);
     CheckFrame(rightFrame.image);
 

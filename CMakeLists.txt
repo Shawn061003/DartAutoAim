@@ -28,8 +28,8 @@ target_include_directories(dart_mcu_protocol INTERFACE
 )
 target_compile_features(dart_mcu_protocol INTERFACE cxx_std_17)
 
-# 主程序：从 YAML 选择输入模式，图片输入依次完成采集、YOLO 与引导灯检测。
-if(DART_BUILD_MAIN)
+# 主程序与HSV工具共用配置、图片采集及可视化模块。
+if(DART_BUILD_MAIN OR (DART_BUILD_HSV_TUNER AND DART_BUILD_YOLO))
     find_package(OpenCV REQUIRED COMPONENTS core imgcodecs imgproc highgui)
     find_package(Threads REQUIRED)
 
@@ -64,6 +64,10 @@ if(DART_BUILD_MAIN)
     target_link_libraries(dart_visualization PUBLIC opencv_core PRIVATE opencv_imgproc opencv_highgui)
     target_compile_options(dart_visualization PRIVATE -Wall -Wextra -Wpedantic)
 
+endif()
+
+# 主程序：从YAML选择模式，依次完成采集、YOLO与引导灯检测。
+if(DART_BUILD_MAIN)
     add_executable(dart_vision src/main.cpp)
     # 默认配置定位到源码目录；模型和媒体路径由 YAML 所在目录解析。
     target_compile_definitions(dart_vision PRIVATE DART_PROJECT_ROOT="${CMAKE_CURRENT_SOURCE_DIR}")
@@ -134,12 +138,22 @@ if(DART_BUILD_YOLO)
     endif()
 endif()
 
-# YOLO ROI HSV调参工具（随YOLO开关启用）：源码在tests，程序由构建目录输出，保存的数据在outputs/hsv_tuner。
+# 双相机HSV调参工具：仅允许YAML的image模式，复用可视化，运行时不写结果文件。
 if(DART_BUILD_HSV_TUNER AND DART_BUILD_YOLO)
     find_package(OpenCV REQUIRED COMPONENTS core imgproc imgcodecs highgui)
     add_executable(dart_hsv_tuner tests/test_hsv_tuner.cpp src/Perception/GuideLightDetect.cpp)
     target_include_directories(dart_hsv_tuner PRIVATE ${OpenCV_INCLUDE_DIRS})
-    target_link_libraries(dart_hsv_tuner PRIVATE dart::yolo opencv_core opencv_imgproc opencv_imgcodecs opencv_highgui)
+    target_link_libraries(dart_hsv_tuner PRIVATE dart::config dart::acquisition dart::visualization dart::yolo opencv_imgproc opencv_highgui)
     target_compile_definitions(dart_hsv_tuner PRIVATE DART_PROJECT_ROOT="${CMAKE_CURRENT_SOURCE_DIR}")
     target_compile_options(dart_hsv_tuner PRIVATE -Wall -Wextra -Wpedantic)
+
+    if(BUILD_TESTING)
+        add_executable(dart_hsv_tuner_test tests/test_hsv_tuner_controls.cpp src/Perception/GuideLightDetect.cpp)
+        target_link_libraries(dart_hsv_tuner_test PRIVATE dart::config dart::acquisition dart::visualization dart::yolo opencv_imgproc opencv_highgui)
+        target_compile_definitions(dart_hsv_tuner_test PRIVATE DART_PROJECT_ROOT="${CMAKE_CURRENT_SOURCE_DIR}")
+        target_compile_options(dart_hsv_tuner_test PRIVATE -Wall -Wextra -Wpedantic)
+        add_test(NAME hsv_tuner COMMAND dart_hsv_tuner_test
+            ${CMAKE_CURRENT_SOURCE_DIR}/config/dart.yaml
+            ${CMAKE_CURRENT_SOURCE_DIR}/outputs/hsv_tuner_tests)
+    endif()
 endif()

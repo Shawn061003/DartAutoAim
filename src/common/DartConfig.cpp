@@ -205,8 +205,10 @@ cv::Scalar readHSV(const cv::FileNode& node, const char* key)
 GuideLightParams readGuideLight(const cv::FileNode& node)
 {
     GuideLightParams result;
-    result.hsvLower = readHSV(node, "hsv_lower");
-    result.hsvUpper = readHSV(node, "hsv_upper");
+    result.leftHsvLower = readHSV(node, "left_hsv_lower");
+    result.leftHsvUpper = readHSV(node, "left_hsv_upper");
+    result.rightHsvLower = readHSV(node, "right_hsv_lower");
+    result.rightHsvUpper = readHSV(node, "right_hsv_upper");
     result.validate();
     return result;
 }

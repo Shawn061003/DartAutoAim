@@ -50,6 +50,7 @@ int main(int argc, char** argv)
                   << std::flush;
 
         CameraFrame left;
+        left.camera_side = CameraSide::Left;
         left.image = cv::Mat::zeros(3648, 5472, CV_8UC3);
         cv::Mat frame;
         std::uint64_t frameId = 0;
@@ -64,6 +65,7 @@ int main(int argc, char** argv)
             }
             CameraFrame right{frame, currentId,
                 static_cast<std::int64_t>(std::llround(video.get(cv::CAP_PROP_POS_MSEC)))};
+            right.camera_side = CameraSide::Right;
             left.frame_id = currentId;
             left.timestamp_ms = right.timestamp_ms;
             const auto start = std::chrono::steady_clock::now();

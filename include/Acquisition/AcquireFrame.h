@@ -22,6 +22,7 @@ public:
 
     // 图片/视频一次提交左右帧；相机异步采集可分别调用 pushLeft/pushRight。
     // 入队拷贝图像数据，隔离相机 SDK 或视频解码器复用的缓冲区。
+    // 按入队侧补全Unknown；显式侧别与入口冲突时抛异常，不修改输入或队列。
     void push(const CameraFrame& left, const CameraFrame& right);
     void pushLeft(const CameraFrame& frame);
     void pushRight(const CameraFrame& frame);
@@ -49,7 +50,7 @@ public:
 private:
     // 调用方已持锁且已验证阈值，避免 GetFrame 中重复加锁。
     bool checkFrameLocked(std::int64_t maxTimestampDiffMs);
-    void pushSingle(std::deque<CameraFrame>& frames, const CameraFrame& frame);
+    void pushSingle(std::deque<CameraFrame>& frames, const CameraFrame& frame, CameraSide side);
 
     const std::size_t capacity_;
     mutable std::mutex mutex_;

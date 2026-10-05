@@ -5,10 +5,12 @@
 #include <utility>
 
 namespace {
-void validateFrame(const CameraFrame& frame)
+void validateFrame(const CameraFrame& frame, CameraSide side)
 {
     if (frame.image.empty() || frame.image.dims != 2 || frame.image.type() != CV_8UC3)
         throw std::invalid_argument("Frame queue requires non-empty CV_8UC3 BGR images");
+    if (frame.camera_side != CameraSide::Unknown && frame.camera_side != side)
+        throw std::invalid_argument("Frame camera_side conflicts with the queue input side");
 }
 
 void validateThreshold(std::int64_t maxTimestampDiffMs)
@@ -25,10 +27,12 @@ StereoFrameQueue::StereoFrameQueue(std::size_t capacity) : capacity_(capacity)
 
 void StereoFrameQueue::push(const CameraFrame& left, const CameraFrame& right)
 {
-    validateFrame(left);
-    validateFrame(right);
+    validateFrame(left, CameraSide::Left);
+    validateFrame(right, CameraSide::Right);
     CameraFrame leftCopy = left;
     CameraFrame rightCopy = right;
+    leftCopy.camera_side = CameraSide::Left;
+    rightCopy.camera_side = CameraSide::Right;
     leftCopy.image = left.image.clone();
     rightCopy.image = right.image.clone();
     std::lock_guard<std::mutex> lock(mutex_);
@@ -44,19 +48,20 @@ void StereoFrameQueue::push(const CameraFrame& left, const CameraFrame& right)
     if (rightFrames_.size() > capacity_) rightFrames_.pop_front();
 }
 
-void StereoFrameQueue::pushSingle(std::deque<CameraFrame>& frames, const CameraFrame& frame)
+void StereoFrameQueue::pushSingle(std::deque<CameraFrame>& frames, const CameraFrame& frame, CameraSide side)
 {
-    validateFrame(frame);
+    validateFrame(frame, side);
     CameraFrame copy = frame;
+    copy.camera_side = side;
     copy.image = frame.image.clone();
     std::lock_guard<std::mutex> lock(mutex_);
     frames.push_back(std::move(copy));
     if (frames.size() > capacity_) frames.pop_front();
 }
 
-void StereoFrameQueue::pushLeft(const CameraFrame& frame) { pushSingle(leftFrames_, frame); }
+void StereoFrameQueue::pushLeft(const CameraFrame& frame) { pushSingle(leftFrames_, frame, CameraSide::Left); }
 
-void StereoFrameQueue::pushRight(const CameraFrame& frame) { pushSingle(rightFrames_, frame); }
+void StereoFrameQueue::pushRight(const CameraFrame& frame) { pushSingle(rightFrames_, frame, CameraSide::Right); }
 
 bool StereoFrameQueue::checkFrameLocked(std::int64_t maxTimestampDiffMs)
 {

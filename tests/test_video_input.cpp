@@ -60,6 +60,8 @@ void testSourceAndOwnership()
                     retained->right.frame_id == retained->left.frame_id, "Frame IDs out of order");
             require(retained->left.timestamp_ms == retained->right.timestamp_ms &&
                     retained->left.timestamp_ms >= previousTime, "Clock mismatch");
+            require(retained->left.camera_side == CameraSide::Left
+                    && retained->right.camera_side == CameraSide::Right, "Acquisition lost camera sides.");
             previousTime = retained->left.timestamp_ms;
             require(retained->left.image.at<cv::Vec3b>(0, 0)[0] == i + 1,
                     "Decoder reuse overwrote queued data");
@@ -129,6 +131,33 @@ void testImages(const std::filesystem::path& dir)
     expectError([&] { VideoInput bad(video, 2); }, "not implemented");
 }
 
+void testCameraSide()
+{
+    CameraFrame unlabelled{cv::Mat(2, 2, CV_8UC3, cv::Scalar(1, 2, 3)), 7, 100};
+    require(unlabelled.camera_side == CameraSide::Unknown, "Default side guessed a camera.");
+    StereoFrameQueue queue(2);
+    queue.push(unlabelled, unlabelled);
+    auto pair = queue.GetFrame(0);
+    require(pair && pair->left.camera_side == CameraSide::Left
+            && pair->right.camera_side == CameraSide::Right, "Pair queue lost camera sides.");
+    require(unlabelled.camera_side == CameraSide::Unknown, "Queue modified its input metadata.");
+    const auto left = pair->left;
+    const auto right = pair->right;
+    queue.pushLeft(left);
+    queue.pushRight(right);
+    pair = queue.GetFrame(0);
+    require(pair && pair->left.camera_side == CameraSide::Left
+            && pair->right.camera_side == CameraSide::Right, "Single-side queue lost camera sides.");
+    expectError([&] { queue.pushLeft(right); }, "camera_side");
+    expectError([&] { queue.pushRight(left); }, "camera_side");
+    expectError([&] { queue.push(left, left); }, "camera_side");
+    require(queue.leftSize() == 0 && queue.rightSize() == 0, "Rejected pair partially entered queue.");
+    queue.pushLeft(unlabelled);
+    queue.pushRight(unlabelled);
+    pair = queue.GetFrame(0);
+    require(pair && pair->left.camera_side == CameraSide::Left
+            && pair->right.camera_side == CameraSide::Right, "PushLeft/Right did not label unknown frames.");
+}
 void testQueue()
 {
     expectError([] { StereoFrameQueue bad(0); }, "capacity");
@@ -276,6 +305,7 @@ int main(int argc, char** argv)
         testImages(dir);
         testSourceAndOwnership();
         testQueue();
+        testCameraSide();
         testFrameMatching();
         std::cout << "Video input tests passed\n";
         return 0;

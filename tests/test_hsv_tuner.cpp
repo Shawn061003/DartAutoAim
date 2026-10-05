@@ -1,284 +1,212 @@
+#include "Acquisition/VideoInput.h"
 #include "Perception/GuideLightDetect.h"
-#include <opencv2/highgui.hpp>
-#include <opencv2/imgcodecs.hpp>
-#include <opencv2/imgproc.hpp>
-#include <algorithm>
+#include "Visualization/Visualize.h"
+#include "common/DartConfig.h"
+
 #include <array>
-#include <chrono>
-#include <cmath>
 #include <filesystem>
 #include <iostream>
+#include <opencv2/highgui.hpp>
 #include <stdexcept>
 #include <string>
-#include <vector>
 
 #ifndef DART_PROJECT_ROOT
 #define DART_PROJECT_ROOT "."
 #endif
 
-// 滑块参数直接传给生产GetContours，不复制圆度选优算法。
-class GuideLightDetectTestAccess {
-public:
-    static std::vector<cv::Point2f> GetContours(
-        const cv::Mat& image, const cv::Rect& roi,
-        const cv::Scalar& lower, const cv::Scalar& upper)
-    {
-        GuideLightDetect detector;
-        detector.hsv_lower_ = lower;
-        detector.hsv_upper_ = upper;
-        return detector.GetContours(image, roi);
-    }
-};
-
 namespace {
-constexpr const char* kWindow = "YOLO - HSV - Contours";
-constexpr const char* kOverview = "YOLO ROIs";
-const std::array<const char*, 6> kSliderNames{
-    "H low", "S low", "V low", "H high", "S high", "V high"};
+constexpr const char* kLeftWindow = "Left HSV - Q/Esc: quit, D: reset";
+constexpr const char* kRightWindow = "Right HSV - Q/Esc: quit, D: reset";
+constexpr std::array<const char*, 6> kSliderNames{
+    "Lower H", "Lower S", "Lower V", "Upper H", "Upper S", "Upper V"};
 using Bounds = std::array<int, 6>;
-constexpr Bounds kInitialBounds{60, 102, 81, 86, 212, 255};
-void SetSliders(const Bounds& values)
+
+Bounds toBounds(const GuideLightParams& params, CameraSide side)
 {
-    for (std::size_t i = 0; i < values.size(); ++i) {
-        cv::setTrackbarPos(kSliderNames[i], kWindow, values[i]);
-    }
+    const auto& lower = side == CameraSide::Left ? params.leftHsvLower : params.rightHsvLower;
+    const auto& upper = side == CameraSide::Left ? params.leftHsvUpper : params.rightHsvUpper;
+    return {int(lower[0]), int(lower[1]), int(lower[2]), int(upper[0]), int(upper[1]), int(upper[2])};
 }
 
-Bounds ReadSliders(const Bounds& previous)
+GuideLightParams toParams(const Bounds& left, const Bounds& right)
+{
+    GuideLightParams params;
+    params.leftHsvLower = cv::Scalar(left[0], left[1], left[2]);
+    params.leftHsvUpper = cv::Scalar(left[3], left[4], left[5]);
+    params.rightHsvLower = cv::Scalar(right[0], right[1], right[2]);
+    params.rightHsvUpper = cv::Scalar(right[3], right[4], right[5]);
+    params.validate();
+    return params;
+}
+
+void setSliders(const char* window, const Bounds& values)
+{
+    for (std::size_t i = 0; i < values.size(); ++i)
+        cv::setTrackbarPos(kSliderNames[i], window, values[i]);
+}
+
+void createSliders(const char* window, const Bounds& values)
+{
+    cv::namedWindow(window, cv::WINDOW_AUTOSIZE);
+    for (std::size_t i = 0; i < values.size(); ++i)
+        cv::createTrackbar(kSliderNames[i], window, nullptr, i % 3 == 0 ? 179 : 255);
+    setSliders(window, values);
+}
+
+Bounds readSliders(const char* window, const Bounds& previous)
 {
     Bounds values;
-    for (std::size_t i = 0; i < values.size(); ++i) {
-        values[i] = cv::getTrackbarPos(kSliderNames[i], kWindow);
-    }
-    // 上下界交叉时，让另一端跟随刚修改的一端，始终保持low <= high。
+    for (std::size_t i = 0; i < values.size(); ++i)
+        values[i] = cv::getTrackbarPos(kSliderNames[i], window);
+    // 仅修正当前相机的另一端，避免上下界交叉；左右滑块没有联动。
     for (std::size_t i = 0; i < 3; ++i) {
         if (values[i] > values[i + 3]) {
             if (values[i] != previous[i]) {
                 values[i + 3] = values[i];
-                cv::setTrackbarPos(kSliderNames[i + 3], kWindow, values[i + 3]);
+                cv::setTrackbarPos(kSliderNames[i + 3], window, values[i + 3]);
             } else {
                 values[i] = values[i + 3];
-                cv::setTrackbarPos(kSliderNames[i], kWindow, values[i]);
+                cv::setTrackbarPos(kSliderNames[i], window, values[i]);
             }
         }
     }
     return values;
 }
 
-struct RoiPreview {
-    cv::Mat mask, filtered, overlay;
-    std::vector<cv::Point2f> contour; // 全图坐标
-    int candidates = 0;
-    double circularity = 0;
-};
-struct Preview {
-    cv::Mat canvas, overview;
-    std::vector<RoiPreview> rois;
-};
-
-void PutPanel(cv::Mat& canvas, const cv::Mat& source, int column, int row,
-              const std::string& label)
+GuideLightDetectVisualize::FrameVisualize makeVisualize(
+    const CameraFrame& frame, const GuideLightDetect::DetectResult& results)
 {
-    constexpr int width = 260, height = 200, rowHeight = 250, header = 55;
-    cv::Mat bgr;
-    if (source.channels() == 1) cv::cvtColor(source, bgr, cv::COLOR_GRAY2BGR);
-    else bgr = source;
-    const double scale = std::min(double(width) / source.cols, double(height) / source.rows);
-    const cv::Size size(std::max(1, int(std::lround(source.cols * scale))),
-                        std::max(1, int(std::lround(source.rows * scale))));
-    cv::Mat resized;
-    cv::resize(bgr, resized, size, 0, 0,
-               source.channels() == 1 || scale >= 1 ? cv::INTER_NEAREST : cv::INTER_AREA);
-    const int y = header + row * rowHeight;
-    resized.copyTo(canvas(cv::Rect(column * width + (width - size.width) / 2,
-                                  y + 25 + (height - size.height) / 2, size.width, size.height)));
-    cv::putText(canvas, label, {column * width + 6, y + 18},
-                cv::FONT_HERSHEY_SIMPLEX, 0.48, {255, 255, 255}, 1, cv::LINE_AA);
+    GuideLightDetectVisualize::FrameVisualize data{
+        {frame.image, frame.frame_id, frame.timestamp_ms}, {}};
+    data.targets.reserve(results.size());
+    for (const auto& result : results)
+        data.targets.push_back({result.roi,
+            result.status == GuideLightDetect::DetectStatus::SUCCESS,
+            result.CenterPoint, result.contours});
+    return data;
 }
 
-Preview MakePreview(const cv::Mat& image, const YOLOInference::YOLOResults& detections,
-                    const Bounds& bounds)
+GuideLightDetect::StereoDetectResult detectPair(
+    const StereoFrame& frame, const YOLOInference::StereoYOLOResult& rois,
+    const Bounds& leftBounds, const Bounds& rightBounds)
 {
-    Preview result;
-    result.overview = image.clone();
-    result.canvas = cv::Mat(55 + 250 * int(detections.size()), 1040,
-                            CV_8UC3, cv::Scalar(35, 35, 35));
-    const cv::Scalar lower(bounds[0], bounds[1], bounds[2]);
-    const cv::Scalar upper(bounds[3], bounds[4], bounds[5]);
-    cv::putText(result.canvas, cv::format("HSV low=(%d,%d,%d) high=(%d,%d,%d)",
-                bounds[0], bounds[1], bounds[2], bounds[3], bounds[4], bounds[5]),
-                {10, 22}, cv::FONT_HERSHEY_SIMPLEX, 0.55, {255, 255, 255}, 1, cv::LINE_AA);
-    cv::putText(result.canvas, "Yellow: candidates | Red: selected | S: save | D: reset | Q / Esc: quit",
-                {10, 44}, cv::FONT_HERSHEY_SIMPLEX, 0.5, {180, 220, 180}, 1, cv::LINE_AA);
-    for (std::size_t i = 0; i < detections.size(); ++i) {
-        const auto& detection = detections[i];
-        const auto& roi = detection.roi;
-        RoiPreview p;
-        cv::Mat hsv;
-        // 所有计算使用原图像素，只有窗口显示时放大ROI。
-        cv::cvtColor(image(roi), hsv, cv::COLOR_BGR2HSV);
-        cv::inRange(hsv, lower, upper, p.mask);
-        cv::bitwise_and(image(roi), image(roi), p.filtered, p.mask);
-        p.overlay = image(roi).clone();
-        std::vector<std::vector<cv::Point>> candidates;
-        cv::findContours(p.mask.clone(), candidates, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_NONE);
-        p.candidates = int(candidates.size());
-        cv::drawContours(p.overlay, candidates, -1, {0, 255, 255}, 1);
-        p.contour = GuideLightDetectTestAccess::GetContours(image, roi, lower, upper);
-        if (!p.contour.empty()) {
-            std::vector<cv::Point> local;
-            for (const auto& point : p.contour)
-                local.emplace_back(cvRound(point.x) - roi.x, cvRound(point.y) - roi.y);
-            cv::drawContours(p.overlay, std::vector<std::vector<cv::Point>>{local}, 0, {0, 0, 255}, 1);
-            const double perimeter = cv::arcLength(p.contour, true);
-            p.circularity = 4 * CV_PI * cv::contourArea(p.contour) / (perimeter * perimeter);
+    // 同一个检测器持有左右参数，由RunDetection/GetContours按侧别选择。
+    GuideLightDetect detector(toParams(leftBounds, rightBounds));
+    return detector.RunDetection(frame.left, frame.right, rois);
+}
+
+cv::Mat drawPair(const StereoFrame& frame, const GuideLightDetect::StereoDetectResult& results)
+{
+    return GuideLightDetectVisualize::Draw(makeVisualize(frame.left, results.left),
+                                          makeVisualize(frame.right, results.right));
+}
+
+void showPair(const cv::Mat& canvas)
+{
+    // 复用可视化模块的左右画面、ROI放大图、轮廓和中心，各侧窗口挂自己的滑块。
+    const int half = canvas.cols / 2;
+    cv::imshow(kLeftWindow, canvas(cv::Rect(0, 0, half, canvas.rows)));
+    cv::imshow(kRightWindow, canvas(cv::Rect(half, 0, canvas.cols - half, canvas.rows)));
+}
+
+struct Options {
+    std::string configPath = (std::filesystem::path(DART_PROJECT_ROOT) / "config/dart.yaml").string();
+    bool checkOnly = false;
+};
+
+Options parseOptions(int argc, char** argv)
+{
+    Options result;
+    bool hasConfig = false;
+    for (int i = 1; i < argc; ++i) {
+        const std::string arg(argv[i]);
+        if (arg == "--config" && !hasConfig) {
+            if (++i == argc || std::string(argv[i]).empty()
+                || std::string(argv[i]).rfind("--", 0) == 0)
+                throw std::invalid_argument("--config requires a YAML path.");
+            result.configPath = argv[i];
+            hasConfig = true;
+        } else if (arg == "--check" && !result.checkOnly) {
+            result.checkOnly = true;
+        } else {
+            throw std::invalid_argument("Usage: dart_hsv_tuner [--config path.yaml] [--check]");
         }
-        cv::rectangle(result.overview, roi, {0, 255, 0}, 2);
-        cv::putText(result.overview, cv::format("ROI %d conf=%.3f", int(i + 1), detection.conf),
-                    {roi.x, std::max(18, roi.y - 8)}, cv::FONT_HERSHEY_SIMPLEX,
-                    0.55, {0, 255, 0}, 1, cv::LINE_AA);
-        PutPanel(result.canvas, image(roi), 0, int(i), cv::format("ROI %d | conf %.3f", int(i + 1), detection.conf));
-        PutPanel(result.canvas, p.mask, 1, int(i), "HSV mask");
-        PutPanel(result.canvas, p.filtered, 2, int(i), "Filtered");
-        PutPanel(result.canvas, p.overlay, 3, int(i), "External contours");
-        cv::putText(result.canvas, cv::format("ROI %d: candidates=%d selected_points=%d circularity=%.4f %s",
-                    int(i + 1), p.candidates, int(p.contour.size()), p.circularity,
-                    p.contour.empty() ? "(no valid contour)" : ""),
-                    {10, 55 + int(i) * 250 + 242}, cv::FONT_HERSHEY_SIMPLEX, 0.48,
-                    {220, 220, 220}, 1, cv::LINE_AA);
-        result.rois.push_back(std::move(p));
     }
     return result;
 }
 
-void SavePreview(const std::filesystem::path& imagePath, const std::filesystem::path& modelPath,
-                 const std::string& camera, const cv::Mat& image,
-                 const YOLOInference::YOLOResults& detections, const Bounds& bounds, const Preview& preview)
+DartCongfig loadImageConfig(const std::string& path)
 {
-    const auto stamp = std::chrono::duration_cast<std::chrono::microseconds>(
-        std::chrono::system_clock::now().time_since_epoch()).count();
-    const auto directory = std::filesystem::path(DART_PROJECT_ROOT) / "outputs" / "hsv_tuner"
-                         / std::to_string(stamp);
-    std::filesystem::create_directories(directory);
-    const auto saveImage = [&](const std::string& name, const cv::Mat& mat) {
-        if (!cv::imwrite((directory / name).string(), mat))
-            throw std::runtime_error("Cannot save image: " + name);
-    };
-    saveImage("preview.png", preview.canvas);
-    saveImage("yolo_rois.png", preview.overview);
-    cv::FileStorage config((directory / "hsv.yaml").string(), cv::FileStorage::WRITE);
-    if (!config.isOpened()) throw std::runtime_error("Cannot save HSV settings.");
-    config << "image" << imagePath.string() << "model" << modelPath.string() << "camera" << camera;
-    config << "hsv_lower" << "[" << bounds[0] << bounds[1] << bounds[2] << "]";
-    config << "hsv_upper" << "[" << bounds[3] << bounds[4] << bounds[5] << "]";
-    config << "coordinate_system" << "full_image_x_right_y_down";
-    config << "detections" << "[";
-    for (std::size_t i = 0; i < detections.size(); ++i) {
-        const auto& roi = detections[i].roi;
-        const auto& p = preview.rois[i];
-        const auto prefix = "roi_" + std::to_string(i + 1);
-        saveImage(prefix + "_original.png", image(roi));
-        saveImage(prefix + "_mask.png", p.mask);
-        saveImage(prefix + "_filtered.png", p.filtered);
-        saveImage(prefix + "_contours.png", p.overlay);
-        // 此状态只说明轮廓提取结果；中心提取尚未实现。
-        config << "{" << "roi" << roi << "confidence" << detections[i].conf
-               << "contour_status" << (p.contour.empty() ? "FAILED" : "SUCCESS")
-               << "candidate_count" << p.candidates << "circularity" << p.circularity
-               << "contour_full_image" << p.contour << "}";
+    DartCongfig config(path);
+    // 在读取左右图片、构造YOLO和创建任何窗口之前拒绝非Image模式。
+    if (config.input.mode != InputMode::Image)
+        throw std::invalid_argument("dart_hsv_tuner requires input.mode=image; camera/video are not supported.");
+    return config;
+}
+
+int runTuner(const Options& options)
+{
+    const auto config = loadImageConfig(options.configPath);
+    VideoInput input(config.input, config.frameQueue.capacity);
+    if (!input.captureNext()) throw std::runtime_error("No image pair available.");
+    const auto frame = input.frameQueue().GetFrame(config.frameQueue.maxTimestampDiffMs);
+    if (!frame) throw std::runtime_error("Captured image pair could not be matched.");
+
+    YOLOInference yolo(config.yolo);
+    const auto rois = yolo.RunYOLOInfer(frame->left, frame->right);
+    // 初始化和重置均使用YAML中各侧自己的HSV参数。
+    const Bounds initialLeft = toBounds(config.guideLight, CameraSide::Left);
+    const Bounds initialRight = toBounds(config.guideLight, CameraSide::Right);
+    Bounds left = initialLeft, right = initialRight;
+    auto canvas = drawPair(*frame, detectPair(*frame, rois, left, right));
+    // 无窗口检查走同一读图/推理/检测/绘制链路，不写文件、不打印结果。
+    if (options.checkOnly) return 0;
+
+    createSliders(kLeftWindow, left);
+    createSliders(kRightWindow, right);
+    showPair(canvas);
+    while (true) {
+        const int key = cv::waitKey(30);
+        if (key == 27 || key == 'q' || key == 'Q') break;
+        // GTK3可能不支持VISIBLE并返回-1；用AUTOSIZE辅助识别已关闭的窗口。
+        const auto closed = [](const char* name) {
+            return cv::getWindowProperty(name, cv::WND_PROP_VISIBLE) == 0.0
+                || cv::getWindowProperty(name, cv::WND_PROP_AUTOSIZE) < 0.0;
+        };
+        if (closed(kLeftWindow) || closed(kRightWindow)) break;
+        if (key == 'd' || key == 'D') {
+            setSliders(kLeftWindow, initialLeft);
+            setSliders(kRightWindow, initialRight);
+        }
+        const auto nextLeft = readSliders(kLeftWindow, left);
+        const auto nextRight = readSliders(kRightWindow, right);
+        if (nextLeft != left || nextRight != right) {
+            left = nextLeft;
+            right = nextRight;
+            canvas = drawPair(*frame, detectPair(*frame, rois, left, right));
+            showPair(canvas);
+        }
     }
-    config << "]";
-    std::cout << "Saved: " << directory << std::endl;
+    cv::destroyAllWindows();
+    return 0;
 }
 } // namespace
 
-// YOLO只在启动时运行一次；滑块更新仅重算每个YOLO ROI的传统视觉。
-// 默认输入是右相机图片。另一侧使用空白占位帧，结果不作为双目测量数据。
-// --preview-only用于无窗口运行同一流程并保存结果。
+#ifndef DART_HSV_TUNER_TEST
 int main(int argc, char** argv)
 {
-    try {
-        auto imagePath = std::filesystem::path(DART_PROJECT_ROOT)
-            / "Input/InputImage/Image_20261003164303751.bmp";
-        auto modelPath = std::filesystem::path(DART_PROJECT_ROOT) / "weights/GuideLightDetect.onnx";
-        std::string camera = "right", device = "CPU";
-        bool previewOnly = false, hasImagePath = false;
-        for (int i = 1; i < argc; ++i) {
-            const std::string arg(argv[i]);
-            if (arg == "--help" || arg == "-h") {
-                std::cout << "Usage: dart_hsv_tuner [image_path] [--camera right|left] "
-                             "[--model model.onnx] [--device CPU] [--preview-only]\n"
-                             "S: save to outputs/hsv_tuner; D: reset HSV; Q/Esc: quit.\n";
-                return 0;
-            }
-            if (arg == "--preview-only") previewOnly = true;
-            else if (arg == "--camera" || arg == "--model" || arg == "--device") {
-                if (++i == argc) throw std::invalid_argument("Missing value for " + arg);
-                if (arg == "--camera") camera = argv[i];
-                else if (arg == "--model") modelPath = argv[i];
-                else device = argv[i];
-            } else if (!hasImagePath && arg.rfind("--", 0) != 0) {
-                imagePath = arg;
-                hasImagePath = true;
-            } else throw std::invalid_argument("Unexpected argument: " + arg);
-        }
-        if (camera != "left" && camera != "right")
-            throw std::invalid_argument("--camera must be left or right.");
-        const cv::Mat image = cv::imread(imagePath.string(), cv::IMREAD_COLOR);
-        if (image.empty()) throw std::runtime_error("Cannot read image: " + imagePath.string());
-        std::cout << "Image: " << imagePath << " (" << image.cols << 'x' << image.rows
-                  << "), camera=" << camera << "\nLoading YOLO on " << device << "..." << std::endl;
-        YOLOInference yolo(modelPath.string(), device);
-        CameraFrame left, right;
-        left.image = camera == "left" ? image : cv::Mat::zeros(3648, 5472, CV_8UC3);
-        right.image = camera == "right" ? image : cv::Mat::zeros(1080, 1440, CV_8UC3);
-        const auto yoloResult = yolo.RunYOLOInfer(left, right);
-        const auto& detections = camera == "left" ? yoloResult.left : yoloResult.right;
-        std::cout << "YOLO ROIs: " << detections.size()
-                  << ". Other camera is a blank placeholder; its results are ignored.\n" << std::flush;
-        if (detections.empty()) throw std::runtime_error("YOLO found no ROI; cannot tune ROI contours.");
-        Bounds bounds = kInitialBounds;
-        auto preview = MakePreview(image, detections, bounds);
-        for (std::size_t i = 0; i < detections.size(); ++i) {
-            std::cout << "ROI " << i + 1 << ": " << detections[i].roi << " conf=" << detections[i].conf
-                      << " candidates=" << preview.rois[i].candidates
-                      << " contour_points=" << preview.rois[i].contour.size() << '\n';
-        }
-        if (previewOnly) {
-            SavePreview(imagePath, modelPath, camera, image, detections, bounds, preview);
-            return 0;
-        }
-        cv::namedWindow(kWindow, cv::WINDOW_AUTOSIZE);
-        cv::namedWindow(kOverview, cv::WINDOW_NORMAL);
-        cv::resizeWindow(kOverview, 720, 540);
-        cv::imshow(kOverview, preview.overview);
-        for (std::size_t i = 0; i < bounds.size(); ++i)
-            cv::createTrackbar(kSliderNames[i], kWindow, nullptr, i % 3 == 0 ? 179 : 255);
-        SetSliders(bounds);
-        bool dirty = true;
-        while (true) {
-            const auto current = ReadSliders(bounds);
-            if (current != bounds) { bounds = current; dirty = true; }
-            if (dirty) {
-                preview = MakePreview(image, detections, bounds);
-                cv::imshow(kWindow, preview.canvas);
-                std::cout << "lower=(" << bounds[0] << ',' << bounds[1] << ',' << bounds[2]
-                          << ") upper=(" << bounds[3] << ',' << bounds[4] << ',' << bounds[5]
-                          << ")\n" << std::flush;
-                dirty = false;
-            }
-            const int key = cv::waitKey(30);
-            const double visible = cv::getWindowProperty(kWindow, cv::WND_PROP_VISIBLE);
-            // 某些HighGUI后端对此属性返回-1，不能将其视为窗口已关闭。
-            if (key == 27 || key == 'q' || key == 'Q' || visible == 0.0) break;
-            if (key == 's' || key == 'S')
-                SavePreview(imagePath, modelPath, camera, image, detections, bounds, preview);
-            if (key == 'd' || key == 'D') { SetSliders(kInitialBounds); dirty = true; }
-        }
-        cv::destroyAllWindows();
+    if (argc == 2 && std::string(argv[1]) == "--help") {
+        std::cout << "Usage: dart_hsv_tuner [--config path.yaml] [--check]\n"
+                     "Requires input.mode=image. Each camera has independent Lower/Upper H/S/V sliders.\n"
+                     "D: reset both cameras from YAML; Q/Esc: quit. No files are written.\n"
+                     "--check: run the image pipeline without windows or result output.\n";
         return 0;
+    }
+    try {
+        return runTuner(parseOptions(argc, argv));
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return 1;
     }
 }
+#endif

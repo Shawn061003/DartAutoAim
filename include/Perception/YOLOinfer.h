@@ -23,6 +23,7 @@ public:
         double conf = 0.0;              // 选中目标的置信度
         std::uint64_t frame_id = 0;      // 来源帧号
         std::int64_t timestamp_ms = 0;   // 来源帧采集时间戳（毫秒）
+        CameraSide camera_side = CameraSide::Unknown; // 从输入帧继承，单独取出ROI也保留来源
     };
 
     using YOLOResults = std::vector<YOLOInferResult>;
@@ -48,6 +49,7 @@ public:
     YOLOInference& operator=(const YOLOInference&) = delete;
 
     /// @brief 同步处理一对已配对图像，返回左右各自最多两个目标的ROI及帧信息。
+    /// @pre 两帧camera_side须分别为Left/Right；Unknown或左右颠倒时抛异常。
     /// @note 右相机整图；左相机整图/四切，不做自适应，四切均无候选时回退整图。
     ///       四切总重叠和左右ROI外扩量由YOLOParams指定。
     ///       不启动线程；调用间保留模型，不重复加载或warmup，同一对象不并发调用。
