@@ -1,11 +1,13 @@
 cmake_minimum_required(VERSION 3.16)
 
 # 可执行程序编译开关（ON 编译，OFF 跳过），也可通过 cmake -D<开关名>=ON/OFF 设置。
-# 两个开关独立生效；仅构建串口程序时，设置 DART_BUILD_MAIN=OFF。
+# 开关独立生效；仅构建串口程序时，设置 DART_BUILD_MAIN=OFF、DART_BUILD_YOLO=OFF。
 option(DART_BUILD_MAIN "Build the dart vision main program" ON)
 option(DART_BUILD_CONTROL_DEMO "Build the manual MCU serial demo" ON)
+option(DART_BUILD_YOLO "Build OpenVINO YOLO inference and tests" ON)
 
 project(dart_vision LANGUAGES CXX)
+include(CTest)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -49,4 +51,32 @@ if(DART_BUILD_CONTROL_DEMO)
     add_executable(dart_control_demo tests/dart_control_demo.cpp)
     target_link_libraries(dart_control_demo PRIVATE dart::mcu_protocol Threads::Threads)
     target_compile_options(dart_control_demo PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
+# YOLO模块独立构建，模型路径和设备由调用方传入。
+if(DART_BUILD_YOLO)
+    find_package(OpenCV REQUIRED COMPONENTS core imgproc dnn)
+    find_package(OpenVINO REQUIRED COMPONENTS Runtime)
+
+    add_library(dart_yolo src/Perception/YOLOinfer.cpp)
+    add_library(dart::yolo ALIAS dart_yolo)
+    target_include_directories(dart_yolo PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include ${OpenCV_INCLUDE_DIRS})
+    target_link_libraries(dart_yolo PUBLIC opencv_core PRIVATE opencv_imgproc opencv_dnn openvino::runtime)
+    target_compile_options(dart_yolo PRIVATE -Wall -Wextra -Wpedantic)
+
+    find_package(OpenCV REQUIRED COMPONENTS imgcodecs videoio)
+    add_executable(dart_yolo_video_test tests/test_yolo_video.cpp)
+    target_link_libraries(dart_yolo_video_test PRIVATE dart::yolo opencv_imgproc opencv_imgcodecs opencv_videoio)
+    target_compile_options(dart_yolo_video_test PRIVATE -Wall -Wextra -Wpedantic)
+
+    if(BUILD_TESTING)
+        add_executable(dart_yolo_test tests/test_yolo_inference.cpp)
+        target_link_libraries(dart_yolo_test PRIVATE dart::yolo openvino::runtime)
+        target_compile_options(dart_yolo_test PRIVATE -Wall -Wextra -Wpedantic)
+        add_test(NAME yolo_inference COMMAND dart_yolo_test ${CMAKE_CURRENT_BINARY_DIR}/yolo_fixtures)
+    endif()
+
+    if(DART_BUILD_MAIN)
+        target_link_libraries(dart_vision PRIVATE dart::yolo)
+    endif()
 endif()

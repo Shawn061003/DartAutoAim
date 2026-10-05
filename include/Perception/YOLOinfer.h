@@ -9,19 +9,13 @@
 
 #include <cstdint>
 #include <memory>
-#include <optional>
 #include <string>
 #include <vector>
 #include <opencv2/core.hpp>
+#include "Acquisition/CameraInput.h"
 
 class YOLOInference {
 public:
-
-    struct CameraFrame {
-        cv::Mat image;                  // 原始图像，调用期间保持有效且不被修改
-        std::uint64_t frame_id = 0;      // 相机帧号 
-        std::int64_t timestamp_ms = 0;   // 采集时间戳（毫秒），左右使用同一时间基准
-    };
 
     struct YOLOInferResult {
         cv::Rect roi;                   // 最终ROI区域，不保存裁剪图像
@@ -30,12 +24,13 @@ public:
         std::int64_t timestamp_ms = 0;   // 来源帧采集时间戳（毫秒）
     };
 
-    using LeftYOLOResult = YOLOInferResult;
-    using RightYOLOResult = YOLOInferResult;
+    using YOLOResults = std::vector<YOLOInferResult>;
+    using LeftYOLOResult = YOLOResults;
+    using RightYOLOResult = YOLOResults;
 
     struct StereoYOLOResult {
-        std::optional<LeftYOLOResult> left;     // 无有效目标时为空
-        std::optional<RightYOLOResult> right;
+        LeftYOLOResult left;     // 每路0~2个结果，按置信度降序排列
+        RightYOLOResult right;
     };
 
     /// @brief 初始化时加载、编译ONNX模型并warmup；device指定OpenVINO推理设备。
@@ -48,7 +43,7 @@ public:
     YOLOInference(const YOLOInference&) = delete;
     YOLOInference& operator=(const YOLOInference&) = delete;
 
-    /// @brief 同步处理一对已配对图像，返回左右各自最高分目标的ROI及帧信息。
+    /// @brief 同步处理一对已配对图像，返回左右各自最多两个目标的ROI及帧信息。
     /// @note 右相机整图；左相机整图/四切，不做自适应，四切均无候选时回退整图。
     ///       四切水平、竖直总重叠均为30px；左/右ROI每侧分别外扩25/10px。
     ///       不启动线程；调用间保留模型，不重复加载或warmup，同一对象不并发调用。
@@ -90,10 +85,10 @@ private:
     /// @return 每张输入的候选集合，组数和顺序与inputs一致。
     YOLOBatchResult YOLOInfer(const std::vector<YOLOPreProcessResult>& inputs);
 
-    /// @brief 还原、汇总并去重候选，选择最高分目标，每侧外扩roiPadding后生成ROI。
-    /// @return ROI及frame的来源信息；无有效候选或裁边后ROI为空时返回空值，图像裁剪由下游完成。
-    /// @note 左右相机共用；batchResult须对应inputs，整图回退由RunYOLOInfer调度。
-    std::optional<YOLOInferResult> PostProcess(const YOLOBatchResult& batchResult,
+    /// @brief 去重后先选最高分框，再选与其IoU=0的最高分框，各自外扩生成ROI。
+    /// @return 按置信度降序返回0~2个ROI及来源信息，图像裁剪由下游完成。
+    /// @note IoU按原图坐标下未外扩的检测框计算；不足两个时保留实际数量。
+    YOLOResults PostProcess(const YOLOBatchResult& batchResult,
                                              const std::vector<YOLOPreProcessResult>& inputs,
                                              const CameraFrame& frame, int roiPadding);
 
