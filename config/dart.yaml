@@ -1,0 +1,53 @@
+%YAML:1.0
+---
+# 原始图像的内参与畸变参数，数值完整保留自 CalibrationResults。
+# K 对应本节的标定分辨率；缩放、ROI 裁剪或 binning 后须按实际成像方式调整。
+# IP 的空字符串、曝光/增益/延迟的 0 均为 TODO 占位，上机前填写/确认。
+# 双目相机之间的旋转和平移外参需要单独标定，后续再扩展相应配置字段。
+# camera_matrix.data 按行排列；dt: d 表示双精度；畸变向量按下方注明的顺序保存。
+
+left_camera:
+   # MV-CS200-10GC
+   device_ip: ""           # TODO: 左相机设备 IP
+   net_ip: ""              # TODO: 左相机对应的本机网口 IP
+   exposure: 0.            # TODO: 曝光时间，微秒
+   gain: 0.                # TODO: 增益
+   extra_info_delay: 0.    # TODO: extra_info 延迟，秒
+   image_width: 5472
+   image_height: 3648
+   camera_matrix: !!opencv-matrix
+      rows: 3
+      cols: 3
+      dt: d
+      data: [ 1.1108131487124905e+04, 0., 2.7355000000000000e+03,
+              0., 1.1087184040250908e+04, 1.8235000000000000e+03,
+              0., 0., 1. ]
+   # 顺序 k1,k2,p1,p2,k3；narrow 模型固定 k2,p1,p2,k3 为 0。
+   distortion_coefficients: !!opencv-matrix
+      rows: 5
+      cols: 1
+      dt: d
+      data: [ 5.1758810115874902e-02, 0., 0., 0., 0. ]
+
+right_camera:
+   # MV-CS016-10GC
+   device_ip: ""           # TODO: 右相机设备 IP
+   net_ip: ""              # TODO: 右相机对应的本机网口 IP
+   exposure: 0.            # TODO: 曝光时间，微秒
+   gain: 0.                # TODO: 增益
+   extra_info_delay: 0.    # TODO: extra_info 延迟，秒
+   image_width: 1440
+   image_height: 1080
+   camera_matrix: !!opencv-matrix
+      rows: 3
+      cols: 3
+      dt: d
+      data: [ 1.1157841132239875e+04, 0., 7.1950000000000000e+02,
+              0., 1.1123139027397028e+04, 5.3950000000000000e+02,
+              0., 0., 1. ]
+   # 顺序 k1,k2,p1,p2,k3；narrow 模型固定 k2,p1,p2,k3 为 0。
+   distortion_coefficients: !!opencv-matrix
+      rows: 5
+      cols: 1
+      dt: d
+      data: [ -4.1769748099546106e-01, 0., 0., 0., 0. ]
