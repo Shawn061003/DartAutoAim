@@ -3,19 +3,19 @@
 # 五板块完整配置。输入模式仅由 input.mode 选择：camera / video / image。
 # 媒体与模型相对路径以本 YAML 所在目录为基准。
 input:
-   mode: "image"
+   mode: "camera"
    left_path: "/home/shiba/DartAutoAim/Input/InputImage/left1.bmp"    # TODO: image/video 模式填写左侧图片或视频路径
    right_path: "/home/shiba/DartAutoAim/Input/InputImage/right1.bmp"   # TODO: image/video 模式填写右侧图片或视频路径
 
 # 标定矩阵对应 image_width/image_height；缩放或裁剪后须调整内参。
-# 设备 IP、曝光、增益和延迟保留 TODO，上机前填写或确认。
+# 相机与网口 IP 已实机确认；标定时 OffsetX/OffsetY 均为 0，采集时保持一致。
 cameras:
    left:
       # MV-CS200-10GC
-      device_ip: ""           # TODO: 左相机设备 IP
-      net_ip: ""              # TODO: 左相机对应的本机网口 IP
-      exposure_us: 0.            # TODO: 曝光时间，微秒
-      gain: 0.                # TODO: 增益
+      device_ip: "192.168.10.2" # 左相机设备 IP，已在 MVS 确认
+      net_ip: "192.168.10.25"  # 左相机对应的上位机网口 enp1s0
+      exposure_us: 10000.      # 手动曝光时间，微秒
+      gain: 0.                # 初始手动增益，启动时按设备支持范围校验
       extra_info_delay_s: 0.    # TODO: extra_info 延迟，秒
       image_width: 5472
       image_height: 3648
@@ -35,10 +35,10 @@ cameras:
 
    right:
       # MV-CS016-10GC
-      device_ip: ""           # TODO: 右相机设备 IP
-      net_ip: ""              # TODO: 右相机对应的本机网口 IP
-      exposure_us: 0.            # TODO: 曝光时间，微秒
-      gain: 0.                # TODO: 增益
+      device_ip: "192.168.20.2" # 右相机设备 IP，已在 MVS 确认
+      net_ip: "192.168.20.25"  # 右相机对应的上位机网口 eno1
+      exposure_us: 10000.      # 手动曝光时间，微秒
+      gain: 0.                # 初始手动增益，启动时按设备支持范围校验
       extra_info_delay_s: 0.    # TODO: extra_info 延迟，秒
       image_width: 1440
       image_height: 1080
