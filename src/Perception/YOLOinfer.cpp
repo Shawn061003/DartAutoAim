@@ -300,10 +300,8 @@ YOLOInference::StereoYOLOResult YOLOInference::RunYOLOInfer(
     const auto leftBatch = YOLOInfer(leftInputs);
     StereoYOLOResult result;
     result.left = PostProcess(leftBatch, leftInputs, leftFrame, params_.leftPaddingPx);
-    // 3. 仅当四块均无有效候选时，再对左相机整图推理一次。
-    const bool noTileCandidates = std::all_of(leftBatch.detections.begin(), leftBatch.detections.end(),
-        [](const auto& detections) { return detections.empty(); });
-    if (kLeftUseTiles && noTileCandidates) {
+    // 3. 四切后处理无有效ROI时回退整图，包括候选全部位于填充区域的情况。
+    if (kLeftUseTiles && result.left.empty()) {
         const auto fullInput = PreProcess(leftFrame.image, MakeRegions(leftFrame.image.size(), false, params_.tileOverlapPx));
         result.left = PostProcess(YOLOInfer(fullInput), fullInput, leftFrame, params_.leftPaddingPx);
     }

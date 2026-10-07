@@ -1,15 +1,19 @@
 #include "common/DartConfig.h"
 #include "Acquisition/VideoInput.h"
+#include "Acquisition/CameraInput.h"
 #include "Acquisition/AcquireFrame.h"
+#include "Acquisition/Quit.h"
 #include "Perception/YOLOinfer.h"
 #include "Perception/GuideLightDetect.h"
 #include "Visualization/Visualize.h"
 
+#include <chrono>
 #include <exception>
 #include <filesystem>
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <thread>
 
 namespace {
 // 默认配置定位到源码目录；显式 --config 路径以进程工作目录为基准。
@@ -90,7 +94,6 @@ int runImageMode(const DartCongfig& config)
     const auto detections = processFrame(*frame, yolo, guideLight);
     std::cout << "Visual detection completed: left_frame=" << frame->left.frame_id
               << " right_frame=" << frame->right.frame_id << '\n';
-    // 单对图片等待按键；GTK3 下也可关闭所有可视化窗口；未来连续帧模式使用默认的短暂刷新。
     GuideLightDetectVisualize::Show(
         makeGuideLightVisualize(frame->left, detections.left),
         makeGuideLightVisualize(frame->right, detections.right), 0);
@@ -101,20 +104,42 @@ int runImageMode(const DartCongfig& config)
 
 int runCameraMode(const DartCongfig& config)
 {
-    std::cout << "Camera configuration loaded: left="
-              << config.leftCamera.width << "x" << config.leftCamera.height
-              << " right=" << config.rightCamera.width << "x"
-              << config.rightCamera.height << '\n';
-    // TODO: 根据 config 启动相机采集，将左右帧送入 StereoFrameQueue。
-    // TODO: 循环调用 GetFrame 获取匹配帧，再复用 processFrame 完成检测。
-    // 相机后端待实现，返回独立状态码，便于调用脚本识别当前功能边界。
-    std::cerr << "Camera acquisition is not implemented yet.\n";
-    return 2;
+    // 1. 注册退出信号并准备输入。先构造信号守卫，保证相机析构后才恢复信号处理。
+    CameraStopSignals stopSignals;
+    CameraInput input(config.leftCamera, config.rightCamera, config.frameQueue.capacity);
+    StereoFrameQueue& frames = input.frameQueue();
+
+    // 2. 模型只加载、预热一次，完成后再启动相机，避免初始化期间积压图像。
+    std::cout << "Loading camera perception on " << config.yolo.device << "...\n" << std::flush;
+    YOLOInference yolo(config.yolo);
+    GuideLightDetect guideLight(config.guideLight);
+    if (stopSignals.stopRequested()) return 0;
+    input.StartCamera();
+    std::cout << "Camera perception started. Press Ctrl+C to stop.\n" << std::flush;
+
+    // 3. GetFrame 每次仅尝试一次配对；缺帧或时间差过大时等待下一次尝试。
+    while (!stopSignals.stopRequested()) {
+        const auto frame = frames.GetFrame(config.frameQueue.maxTimestampDiffMs);
+        if (!frame) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            continue;
+        }
+
+        // 4. 完成左右帧的 YOLO ROI 提取和引导灯检测，保持原图坐标及帧来源。
+        const auto detections = processFrame(*frame, yolo, guideLight);
+        // detections 是本阶段输出；空集合和 FAILED 项均保留真实检测含义。
+        // TODO: 后续在此接入双目目标关联及解算，相同下标不表示同一物理目标。
+    }
+
+    // 5. 正常退出显式停止；初始化或检测抛异常时由 CameraInput 析构完成同样清理。
+    input.StopCamera();
+    std::cout << "Camera perception stopped.\n";
+    return 0;
 }
 } // namespace
 
 // 主入口只负责解析运行参数、选择对应配置与处理流程、统一报告异常。
-// 返回码：0 表示图片检测完成或帮助已显示；1 表示错误；2 表示输入后端待实现。
+// 返回码：0 表示处理完成、相机正常停止或帮助已显示；1 表示错误；2 表示输入后端待实现。
 int main(int argc, char* argv[])
 {
     if (argc == 2 && std::string(argv[1]) == "--help") {

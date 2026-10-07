@@ -50,7 +50,7 @@ public:
 
     /// @brief 同步处理一对已配对图像，返回左右各自最多两个目标的ROI及帧信息。
     /// @pre 两帧camera_side须分别为Left/Right；Unknown或左右颠倒时抛异常。
-    /// @note 右相机整图；左相机整图/四切，不做自适应，四切均无候选时回退整图。
+    /// @note 右相机整图；左相机整图/四切，不做自适应，四切后处理无有效ROI时回退整图。
     ///       四切总重叠和左右ROI外扩量由YOLOParams指定。
     ///       不启动线程；调用间保留模型，不重复加载或warmup，同一对象不并发调用。
     StereoYOLOResult RunYOLOInfer(const CameraFrame& leftFrame, const CameraFrame& rightFrame);

@@ -58,12 +58,33 @@ void WriteFixture(const std::filesystem::path& path,
     ov::serialize(model, path.string());
 }
 
+// 四切输出高分填充区框，整图输出有效框，检查裁剪后无ROI时的回退。
+void WritePaddingFallbackFixture(const std::filesystem::path& path)
+{
+    namespace op = ov::opset13;
+    auto input = std::make_shared<op::Parameter>(ov::element::f32, ov::PartialShape{-1, 3, 512, 512});
+    auto batch = std::make_shared<op::Gather>(std::make_shared<op::ShapeOf>(input),
+        op::Constant::create(ov::element::i64, ov::Shape{1}, {0}),
+        op::Constant::create(ov::element::i64, ov::Shape{}, {0}));
+    auto tiled = std::make_shared<op::Equal>(batch,
+        op::Constant::create(ov::element::i64, ov::Shape{1}, {4}));
+    auto detection = std::make_shared<op::Select>(tiled,
+        op::Constant::create(ov::element::f32, ov::Shape{1, 5, 1}, {256.0F, 64.0F, 20.0F, 20.0F, .9F}),
+        op::Constant::create(ov::element::f32, ov::Shape{1, 5, 1}, {256.0F, 256.0F, 20.0F, 20.0F, .9F}));
+    auto outputShape = std::make_shared<op::Concat>(ov::OutputVector{batch,
+        op::Constant::create(ov::element::i64, ov::Shape{2}, {5, 1})}, 0);
+    auto output = std::make_shared<op::Broadcast>(detection, outputShape);
+    ov::serialize(std::make_shared<ov::Model>(ov::OutputVector{output}, ov::ParameterVector{input}),
+                  path.string());
+}
+
 // 用红色均值驱动分数，验证RGB预处理和batch顺序；混色模型用于验证整图回退。
 void GenerateFixtures(const std::filesystem::path& path)
 {
     std::filesystem::create_directories(path);
     WriteFixture(path / "raw.xml", {{256, 256, 20, 20, 1}});
     WriteFixture(path / "fallback.xml", {{256, 256, 20, 20, 1}}, true);
+    WritePaddingFallbackFixture(path / "padding_fallback.xml");
     WriteFixture(path / "edge.xml", {{5, 5, 20, 20, 1}});
     WriteFixture(path / "two_targets.xml", {
         {128, 128, 20, 20, .80F}, {384, 384, 20, 20, .95F}, {256, 256, 20, 20, .70F}});
@@ -152,6 +173,17 @@ int main(int argc, char** argv)
         result = fallback.RunYOLOInfer(left, right);
         Expect(result.left, cv::Rect(452, 452, 90, 90), 9, 1235, CameraSide::Left);
         Require(result.right.empty(), "Blank right image should have no detection.");
+
+        // 非方形切块的y=54..74位于上填充带，后处理会丢弃全部四切候选。
+        // 整图框位于图像中心；回退后须保留两侧各自的ROI外扩和帧元数据。
+        YOLOInference paddingFallback((models / "padding_fallback.xml").string(), "CPU");
+        CameraFrame paddedLeft{cv::Mat::zeros(512, 1024, CV_8UC3), 81, 2000, CameraSide::Left};
+        CameraFrame paddedRight{paddedLeft.image, 82, 2001, CameraSide::Right};
+        const auto paddingResult = paddingFallback.RunYOLOInfer(paddedLeft, paddedRight);
+        Require(paddingResult.left.size() == 1 && paddingResult.right.size() == 1,
+                "Candidates confined to padding prevented full-image fallback.");
+        Expect(paddingResult.left, cv::Rect(467, 211, 90, 90), 81, 2000, CameraSide::Left);
+        Expect(paddingResult.right, cv::Rect(482, 226, 60, 60), 82, 2001, CameraSide::Right);
 
         // 负坐标框外扩后仍须裁至图像边界。
         YOLOInference edge((models / "edge.xml").string(), "CPU");

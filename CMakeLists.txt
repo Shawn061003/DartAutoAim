@@ -6,6 +6,7 @@ option(DART_BUILD_MAIN "Build the dart vision main program" ON)
 option(DART_BUILD_CONTROL_DEMO "Build the manual MCU serial demo" ON)
 option(DART_BUILD_YOLO "Build OpenVINO YOLO inference and tests" ON)
 option(DART_BUILD_HSV_TUNER "Build YOLO ROI HSV tuner (requires DART_BUILD_YOLO)" ON)
+option(DART_BUILD_CALIBRATION "Build standalone monocular and stereo calibration" ON)
 
 # 主程序的图片检测链调用 YOLO；关闭该模块时须同时关闭主程序。
 if(DART_BUILD_MAIN AND NOT DART_BUILD_YOLO)
@@ -18,6 +19,21 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+# 单目/双目标定独立编译，支持不同 ROI；可执行文件直接放在 build 中。
+if(DART_BUILD_CALIBRATION)
+    find_package(OpenCV REQUIRED COMPONENTS core imgproc imgcodecs calib3d)
+    add_executable(demarcate sub_module/demarcate.cpp)
+    target_include_directories(demarcate PRIVATE ${OpenCV_INCLUDE_DIRS})
+    target_link_libraries(demarcate PRIVATE opencv_core opencv_imgproc opencv_imgcodecs opencv_calib3d)
+    target_compile_options(demarcate PRIVATE -Wall -Wextra -Wpedantic)
+    # 双目标定读取原图和单目参数，输出一个YAML和一张校正参考图。
+    add_executable(stereo_calibrate tests/stereo_calibrate.cpp)
+    target_include_directories(stereo_calibrate PRIVATE ${OpenCV_INCLUDE_DIRS})
+    target_link_libraries(stereo_calibrate PRIVATE opencv_core opencv_imgproc opencv_imgcodecs opencv_calib3d)
+    target_compile_options(stereo_calibrate PRIVATE -Wall -Wextra -Wpedantic)
+    target_compile_definitions(stereo_calibrate PRIVATE DART_PROJECT_ROOT="${CMAKE_CURRENT_SOURCE_DIR}")
+endif()
 
 # 公共模块：镖架 MCU 帧编解码与 CRC8 校验（仅头文件）。
 # INTERFACE 向链接该目标的调用方传递头文件目录和 C++ 标准要求。
@@ -45,6 +61,7 @@ if(DART_BUILD_MAIN OR (DART_BUILD_HSV_TUNER AND DART_BUILD_YOLO))
     target_compile_features(dart_config PUBLIC cxx_std_17)
 
     add_library(dart_acquisition
+        src/Acquisition/Quit.cpp
         src/Acquisition/AcquireFrame.cpp
         src/Acquisition/VideoInput.cpp
     )
@@ -54,6 +71,35 @@ if(DART_BUILD_MAIN OR (DART_BUILD_HSV_TUNER AND DART_BUILD_YOLO))
     )
     target_link_libraries(dart_acquisition PUBLIC opencv_core Threads::Threads PRIVATE opencv_imgcodecs)
     target_compile_options(dart_acquisition PRIVATE -Wall -Wextra -Wpedantic)
+
+    # 相机模块始终参与视觉模块构建；编译需要 MVS SDK，无需连接物理相机。
+    set(MVS_ROOT "/opt/MVS" CACHE PATH "Hikrobot MVS SDK installation")
+    find_path(MVS_INCLUDE_DIR MvCameraControl.h HINTS "${MVS_ROOT}/include")
+    if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+        set(_mvs_lib_dir "${MVS_ROOT}/lib/64")
+    else()
+        set(_mvs_lib_dir "${MVS_ROOT}/lib/32")
+    endif()
+    find_library(MVS_LIBRARY MvCameraControl HINTS "${_mvs_lib_dir}")
+    if(NOT MVS_INCLUDE_DIR OR NOT MVS_LIBRARY)
+        message(FATAL_ERROR "Camera acquisition requires MVS headers/library; set MVS_ROOT")
+    endif()
+    add_library(dart_camera src/Acquisition/CameraInput.cpp)
+    add_library(dart::camera ALIAS dart_camera)
+    target_include_directories(dart_camera PRIVATE ${MVS_INCLUDE_DIR})
+    target_link_libraries(dart_camera PUBLIC dart::acquisition PRIVATE ${MVS_LIBRARY})
+    target_compile_options(dart_camera PRIVATE -Wall -Wextra -Wpedantic)
+
+    if(BUILD_TESTING)
+        # 用 SDK 函数替身验证超时、缓存所有权和线程退出，不访问真实相机。
+        add_executable(dart_camera_input_test
+            tests/test_camera_input.cpp src/Acquisition/CameraInput.cpp)
+        target_include_directories(dart_camera_input_test PRIVATE ${MVS_INCLUDE_DIR})
+        target_link_libraries(dart_camera_input_test PRIVATE dart::acquisition)
+        target_compile_options(dart_camera_input_test PRIVATE -Wall -Wextra -Wpedantic)
+        add_test(NAME camera_input COMMAND dart_camera_input_test)
+        set_tests_properties(camera_input PROPERTIES TIMEOUT 15)
+    endif()
 
     # 可视化独立于采集与感知模块，仅依赖 OpenCV。
     add_library(dart_visualization src/Visualization/Visualize.cpp)
@@ -73,8 +119,18 @@ if(DART_BUILD_MAIN)
     target_compile_definitions(dart_vision PRIVATE DART_PROJECT_ROOT="${CMAKE_CURRENT_SOURCE_DIR}")
     target_compile_options(dart_vision PRIVATE -Wall -Wextra -Wpedantic)
     target_link_libraries(dart_vision PRIVATE dart::config dart::mcu_protocol dart::acquisition dart::visualization)
+    target_link_libraries(dart_vision PRIVATE dart::camera)
 
     if(BUILD_TESTING)
+        # 相机主循环测试使用设备/感知替身；验证配对、退出和显示数据传递，不访问相机或窗口。
+        add_executable(dart_camera_mode_test tests/test_camera_mode.cpp)
+        target_link_libraries(dart_camera_mode_test PRIVATE dart::config dart::acquisition)
+        target_compile_definitions(dart_camera_mode_test PRIVATE
+            DART_PROJECT_ROOT="${CMAKE_CURRENT_SOURCE_DIR}")
+        target_compile_options(dart_camera_mode_test PRIVATE -Wall -Wextra -Wpedantic)
+        add_test(NAME camera_mode COMMAND dart_camera_mode_test ${CMAKE_CURRENT_SOURCE_DIR}/config/dart.yaml)
+        set_tests_properties(camera_mode PROPERTIES TIMEOUT 15)
+
         add_executable(dart_config_test tests/test_dart_config.cpp)
         target_link_libraries(dart_config_test PRIVATE dart::config)
         add_test(NAME dart_config COMMAND dart_config_test

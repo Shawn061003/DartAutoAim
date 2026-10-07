@@ -124,3 +124,10 @@ std::size_t StereoFrameQueue::rightSize() const
     std::lock_guard<std::mutex> lock(mutex_);
     return rightFrames_.size();
 }
+
+void StereoFrameQueue::clear()
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    leftFrames_.clear();
+    rightFrames_.clear();
+}

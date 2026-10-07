@@ -46,6 +46,8 @@ public:
     std::size_t size() const;
     std::size_t leftSize() const;
     std::size_t rightSize() const;
+    // 清空两侧缓存；相机停止或重启时丢弃旧帧，队列对象和已有引用保持有效。
+    void clear();
 
 private:
     // 调用方已持锁且已验证阈值，避免 GetFrame 中重复加锁。
