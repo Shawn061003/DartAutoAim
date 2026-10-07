@@ -143,9 +143,16 @@ void CameraDevice::SetCamera()
         throw std::runtime_error("Camera dimensions/offset do not match full-image calibration: " +
                                  params_.deviceIp);
 
-    // 4. SDK 优先提供最新帧，避免处理稍慢时在 SDK 内部持续累积延迟。
+    // 4. 限制 SDK 缓存，并在支持时优先取最新帧以减小延迟。
     checkSdk(MV_CC_SetImageNodeNum(handle_, 2), "MV_CC_SetImageNodeNum");
-    checkSdk(MV_CC_SetGrabStrategy(handle_, MV_GrabStrategy_LatestImagesOnly), "MV_CC_SetGrabStrategy");
+    const int strategyResult = MV_CC_SetGrabStrategy(handle_, MV_GrabStrategy_LatestImagesOnly);
+    // Linux 普通 GigE 设备可能不支持切换策略；此时保留默认的 OneByOne 顺序取帧。
+    // 只容忍明确的“不支持”，避免掩盖无效句柄、调用顺序等其他错误。
+    if (static_cast<unsigned int>(strategyResult) == MV_E_SUPPORT)
+        std::fprintf(stderr, "[CameraInput] latest-frame strategy unsupported for %s; keeping default OneByOne\n",
+                     params_.deviceIp.c_str());
+    else
+        checkSdk(strategyResult, "MV_CC_SetGrabStrategy");
     // extraInfoDelay 尚无对应的图像时钟补偿约定，采集端不使用它修改时间戳。
 }
 
