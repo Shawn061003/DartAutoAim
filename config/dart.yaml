@@ -3,7 +3,7 @@
 # 五板块完整配置。输入模式仅由 input.mode 选择：camera / video / image。
 # 媒体与模型相对路径以本 YAML 所在目录为基准。
 input:
-   mode: "camera"
+   mode: "image"
    left_path: "/home/shiba/DartAutoAim/Input/InputImage/left1.bmp"    # TODO: image/video 模式填写左侧图片或视频路径
    right_path: "/home/shiba/DartAutoAim/Input/InputImage/right1.bmp"   # TODO: image/video 模式填写右侧图片或视频路径
 
@@ -73,9 +73,9 @@ yolo:
    nms_iou_threshold: 0.45
    warmup_count: 3           # 每套 batch 请求的预热次数，至少 1
 
-# 左右相机分别设置 HSV 阈值；H: 0..179，S/V: 0..255，包含上下界。
+# 左右相机分别设置绿色差分阈值；范围[-255,255]，支持小数，保留下界<D<=上界的像素。
 guide_light:
-   right_hsv_lower: [60, 102, 81]
-   right_hsv_upper: [86, 212, 255]
-   left_hsv_lower: [61, 210, 140]
-   left_hsv_upper: [74, 230, 240]
+   right_diff_lower: 30.
+   right_diff_upper: 255.
+   left_diff_lower: 30.
+   left_diff_upper: 255.

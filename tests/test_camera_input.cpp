@@ -27,6 +27,7 @@ struct Device {
 };
 std::atomic<int> handles{0}, leases{0}, gets{0}, frees{0}, activeGets{0};
 std::atomic<int> initializations{0}, finalizations{0}, violations{0};
+int grabStrategyResult = MV_OK;
 bool failRightOpen = false;
 bool failConvert = false;
 bool timeout = false;
@@ -44,6 +45,7 @@ void reset()
     gets = frees = 0;
     failRightOpen = failConvert = timeout = wrongSize = truncated = lostPacket = rgb = false;
     connected = true;
+    grabStrategyResult = MV_OK;
 }
 } // namespace fake
 
@@ -101,7 +103,7 @@ int MV_CC_GetIntValueEx(void*, const char* name, MVCC_INTVALUE_EX* value)
     return MV_OK;
 }
 int MV_CC_SetImageNodeNum(void*, unsigned int) { return MV_OK; }
-int MV_CC_SetGrabStrategy(void*, MV_GRAB_STRATEGY) { return MV_OK; }
+int MV_CC_SetGrabStrategy(void*, MV_GRAB_STRATEGY) { return fake::grabStrategyResult; }
 int MV_CC_StartGrabbing(void* handle)
 {
     auto& d = *static_cast<fake::Device*>(handle);
@@ -231,6 +233,25 @@ int main()
             fake::connected = false;
             requireThrow([&] { d.GrabImage(10); }, "Disconnected camera returned ordinary timeout");
             d.StopGrabbing(); d.StopGrabbing();
+        }
+        fake::reset();
+
+        // Linux GigE 不支持切换取流策略时，双相机仍能启动并产出图像。
+        {
+            fake::grabStrategyResult = static_cast<int>(MV_E_SUPPORT);
+            CameraInput input(params(), params(true), 2, 10);
+            input.StartCamera();
+            require(waitPair(input).has_value(), "Unsupported grab strategy blocked capture");
+            input.StopCamera();
+        }
+        fake::reset();
+
+        // 其他策略设置错误仍须终止启动并释放设备，不能被兼容分支吞掉。
+        {
+            fake::grabStrategyResult = static_cast<int>(MV_E_CALLORDER);
+            CameraDevice d(params(), CameraSide::Left);
+            requireThrow([&] { d.StartGrabbing(); }, "Grab strategy error ignored");
+            require(fake::handles == 0 && fake::gets == 0, "Strategy failure leaked device or started capture");
         }
         fake::reset();
 

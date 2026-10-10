@@ -13,7 +13,7 @@
 class GuideLightDetect
 {
 public:
-    // 主程序传入 YAML 中的 HSV 阈值；默认参数供离线工具直接构造使用。
+    // 主程序传入 YAML 中的绿色差分上下界；默认参数供离线工具直接构造使用。
     explicit GuideLightDetect(const GuideLightParams& params = {});
 
     enum class DetectStatus {
@@ -51,16 +51,24 @@ public:
                                     const YOLOInference::StereoYOLOResult& result);
 
 private:
-    // 调参测试访问同一份GetContours实现，不开放生产流程中的中间步骤。
+    // 测试访问生产流程中的差分和轮廓实现，不公开中间步骤。
     friend class GuideLightDetectTestAccess;
-    // 由构造参数初始化；OpenCV 8位HSV：H 0~179，S/V 0~255。
-    cv::Scalar right_hsv_lower_;
-    cv::Scalar right_hsv_upper_;
-    cv::Scalar left_hsv_lower_;
-    cv::Scalar left_hsv_upper_;
-    /// @brief 在单个ROI内筛选高亮绿色，并选取圆度最高的有效外轮廓。
-    /// @param image CV_8UC3 BGR全图；roi为YOLO提供的有效区域。
-    /// @param side 输入来自左相机还是右相机，用于选择对应HSV阈值。
+    // 由构造参数初始化；两侧各自使用(lower,upper]差分区间。
+    double right_diff_lower_;
+    double right_diff_upper_;
+    double left_diff_lower_;
+    double left_diff_upper_;
+
+    /// @brief 逐像素计算绿色差分 D = G - (R+B)/2，不修改输入图像。
+    /// @param image 非空CV_8UC3 BGR全图。
+    /// @param side 来源相机；预留侧别参数，当前两侧使用相同公式，返回Mat不携带侧别。
+    /// @return 与输入同尺寸的CV_32FC1差分全图，保留[-255,255]内的负值和小数，不归一化。
+    cv::Mat GetGreenDifference(const cv::Mat& image, CameraSide side);
+
+    /// @brief 在单个ROI内保留差分下界<D<=上界的像素，并选取圆度最高的有效外轮廓。
+    /// @param image 已由GetGreenDifference生成的CV_32FC1单通道差分全图。
+    /// @param roi YOLO提供的有效全图区域。
+    /// @param side 来源相机，用于选择该侧的差分上下界。
     /// @return 全图坐标下的有序外轮廓，保留全部边界像素；无有效轮廓时返回空集合。
     std::vector<cv::Point2f> GetContours(const cv::Mat& image, const cv::Rect& roi,
                                          CameraSide side);

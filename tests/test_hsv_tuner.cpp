@@ -15,60 +15,59 @@
 #endif
 
 namespace {
-constexpr const char* kLeftWindow = "Left HSV - Q/Esc: quit, D: reset";
-constexpr const char* kRightWindow = "Right HSV - Q/Esc: quit, D: reset";
-constexpr std::array<const char*, 6> kSliderNames{
-    "Lower H", "Lower S", "Lower V", "Upper H", "Upper S", "Upper V"};
-using Bounds = std::array<int, 6>;
+constexpr const char* kLeftWindow = "Left difference";
+constexpr const char* kRightWindow = "Right difference";
+constexpr std::array<const char*, 2> kSliderNames{"Lower (0.5 per step)", "Upper (0.5 per step)"};
+using Bounds = std::array<double, 2>;
 
 Bounds toBounds(const GuideLightParams& params, CameraSide side)
 {
-    const auto& lower = side == CameraSide::Left ? params.leftHsvLower : params.rightHsvLower;
-    const auto& upper = side == CameraSide::Left ? params.leftHsvUpper : params.rightHsvUpper;
-    return {int(lower[0]), int(lower[1]), int(lower[2]), int(upper[0]), int(upper[1]), int(upper[2])};
+    const double lower = side == CameraSide::Left ? params.leftDiffLower : params.rightDiffLower;
+    const double upper = side == CameraSide::Left ? params.leftDiffUpper : params.rightDiffUpper;
+    return {lower, upper};
 }
 
 GuideLightParams toParams(const Bounds& left, const Bounds& right)
 {
     GuideLightParams params;
-    params.leftHsvLower = cv::Scalar(left[0], left[1], left[2]);
-    params.leftHsvUpper = cv::Scalar(left[3], left[4], left[5]);
-    params.rightHsvLower = cv::Scalar(right[0], right[1], right[2]);
-    params.rightHsvUpper = cv::Scalar(right[3], right[4], right[5]);
+    params.leftDiffLower = left[0];
+    params.leftDiffUpper = left[1];
+    params.rightDiffLower = right[0];
+    params.rightDiffUpper = right[1];
     params.validate();
     return params;
 }
 
+// 8位BGR的差分步长为0.5；滑块0..1020对应阈值-255..255，窗口标题显示实际阈值。
+int sliderPosition(double bound) { return cvRound(bound * 2.0) + 510; }
+
 void setSliders(const char* window, const Bounds& values)
 {
     for (std::size_t i = 0; i < values.size(); ++i)
-        cv::setTrackbarPos(kSliderNames[i], window, values[i]);
+        cv::setTrackbarPos(kSliderNames[i], window, sliderPosition(values[i]));
 }
 
 void createSliders(const char* window, const Bounds& values)
 {
     cv::namedWindow(window, cv::WINDOW_AUTOSIZE);
     for (std::size_t i = 0; i < values.size(); ++i)
-        cv::createTrackbar(kSliderNames[i], window, nullptr, i % 3 == 0 ? 179 : 255);
+        cv::createTrackbar(kSliderNames[i], window, nullptr, 1020);
     setSliders(window, values);
 }
 
 Bounds readSliders(const char* window, const Bounds& previous)
 {
-    Bounds values;
-    for (std::size_t i = 0; i < values.size(); ++i)
-        values[i] = cv::getTrackbarPos(kSliderNames[i], window);
-    // 仅修正当前相机的另一端，避免上下界交叉；左右滑块没有联动。
-    for (std::size_t i = 0; i < 3; ++i) {
-        if (values[i] > values[i + 3]) {
-            if (values[i] != previous[i]) {
-                values[i + 3] = values[i];
-                cv::setTrackbarPos(kSliderNames[i + 3], window, values[i + 3]);
-            } else {
-                values[i] = values[i + 3];
-                cv::setTrackbarPos(kSliderNames[i], window, values[i]);
-            }
-        }
+    Bounds values = previous;
+    for (std::size_t i = 0; i < values.size(); ++i) {
+        const int position = cv::getTrackbarPos(kSliderNames[i], window);
+        // 滑块未移动时保留YAML原始小数精度。
+        if (position != sliderPosition(previous[i])) values[i] = (position - 510) * 0.5;
+    }
+    // 调整同侧另一端，使上下界保持有序；左右滑块独立更新。
+    if (values[0] > values[1]) {
+        if (values[0] != previous[0]) values[1] = values[0];
+        else values[0] = values[1];
+        setSliders(window, values);
     }
     return values;
 }
@@ -101,9 +100,11 @@ cv::Mat drawPair(const StereoFrame& frame, const GuideLightDetect::StereoDetectR
                                           makeVisualize(frame.right, results.right));
 }
 
-void showPair(const cv::Mat& canvas)
+void showPair(const cv::Mat& canvas, const Bounds& left, const Bounds& right)
 {
     // 复用可视化模块的左右画面、ROI放大图、轮廓和中心，各侧窗口挂自己的滑块。
+    cv::setWindowTitle(kLeftWindow, cv::format("Left: %.2f < D <= %.2f | Q/Esc: quit, D: reset", left[0], left[1]));
+    cv::setWindowTitle(kRightWindow, cv::format("Right: %.2f < D <= %.2f | Q/Esc: quit, D: reset", right[0], right[1]));
     const int half = canvas.cols / 2;
     cv::imshow(kLeftWindow, canvas(cv::Rect(0, 0, half, canvas.rows)));
     cv::imshow(kRightWindow, canvas(cv::Rect(half, 0, canvas.cols - half, canvas.rows)));
@@ -154,7 +155,7 @@ int runTuner(const Options& options)
 
     YOLOInference yolo(config.yolo);
     const auto rois = yolo.RunYOLOInfer(frame->left, frame->right);
-    // 初始化和重置均使用YAML中各侧自己的HSV参数。
+    // 初始化和重置均使用YAML中各侧自己的差分上下界。
     const Bounds initialLeft = toBounds(config.guideLight, CameraSide::Left);
     const Bounds initialRight = toBounds(config.guideLight, CameraSide::Right);
     Bounds left = initialLeft, right = initialRight;
@@ -164,7 +165,7 @@ int runTuner(const Options& options)
 
     createSliders(kLeftWindow, left);
     createSliders(kRightWindow, right);
-    showPair(canvas);
+    showPair(canvas, left, right);
     while (true) {
         const int key = cv::waitKey(30);
         if (key == 27 || key == 'q' || key == 'Q') break;
@@ -175,8 +176,12 @@ int runTuner(const Options& options)
         };
         if (closed(kLeftWindow) || closed(kRightWindow)) break;
         if (key == 'd' || key == 'D') {
-            setSliders(kLeftWindow, initialLeft);
-            setSliders(kRightWindow, initialRight);
+            left = initialLeft;
+            right = initialRight;
+            setSliders(kLeftWindow, left);
+            setSliders(kRightWindow, right);
+            canvas = drawPair(*frame, detectPair(*frame, rois, left, right));
+            showPair(canvas, left, right);
         }
         const auto nextLeft = readSliders(kLeftWindow, left);
         const auto nextRight = readSliders(kRightWindow, right);
@@ -184,7 +189,7 @@ int runTuner(const Options& options)
             left = nextLeft;
             right = nextRight;
             canvas = drawPair(*frame, detectPair(*frame, rois, left, right));
-            showPair(canvas);
+            showPair(canvas, left, right);
         }
     }
     cv::destroyAllWindows();
@@ -197,7 +202,7 @@ int main(int argc, char** argv)
 {
     if (argc == 2 && std::string(argv[1]) == "--help") {
         std::cout << "Usage: dart_hsv_tuner [--config path.yaml] [--check]\n"
-                     "Requires input.mode=image. Each camera has independent Lower/Upper H/S/V sliders.\n"
+                     "Requires input.mode=image. Each camera has independent difference Lower/Upper sliders (0.5 per step).\n"
                      "D: reset both cameras from YAML; Q/Esc: quit. No files are written.\n"
                      "--check: run the image pipeline without windows or result output.\n";
         return 0;

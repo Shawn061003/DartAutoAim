@@ -127,6 +127,10 @@ int runCameraMode(const DartCongfig& config)
 
         // 4. 完成左右帧的 YOLO ROI 提取和引导灯检测，保持原图坐标及帧来源。
         const auto detections = processFrame(*frame, yolo, guideLight);
+        // 连续刷新左右传统视觉结果；短暂处理窗口事件，避免等待按键阻塞相机循环。
+        GuideLightDetectVisualize::Show(
+            makeGuideLightVisualize(frame->left, detections.left),
+            makeGuideLightVisualize(frame->right, detections.right), 1);
         // detections 是本阶段输出；空集合和 FAILED 项均保留真实检测含义。
         // TODO: 后续在此接入双目目标关联及解算，相同下标不表示同一物理目标。
     }

@@ -6,7 +6,7 @@
 #include <csignal>
 
 namespace {
-int yoloLoads = 0, yoloCalls = 0, detectionCalls = 0, stopCalls = 0, yoloShows = 0;
+int yoloLoads = 0, yoloCalls = 0, detectionCalls = 0, stopCalls = 0, yoloShows = 0, guideShows = 0;
 bool active = false, failStart = false, failDetection = false, emptyResults = false;
 
 void require(bool condition, const char* message)
@@ -15,7 +15,7 @@ void require(bool condition, const char* message)
 }
 void reset()
 {
-    yoloLoads = yoloCalls = detectionCalls = stopCalls = yoloShows = 0;
+    yoloLoads = yoloCalls = detectionCalls = stopCalls = yoloShows = guideShows = 0;
     active = failStart = failDetection = emptyResults = false;
 }
 void priorSignalHandler(int) {}
@@ -92,9 +92,17 @@ void YOLOInferenceVisualize::Show(const FrameVisualize& left, const FrameVisuali
     require(left.targets.size() == (emptyResults ? 0u : 1u) &&
             right.targets.size() == (emptyResults ? 0u : 1u), "Visualization lost YOLO results");
 }
-void GuideLightDetectVisualize::Show(const FrameVisualize&, const FrameVisualize&, int)
+void GuideLightDetectVisualize::Show(const FrameVisualize& left, const FrameVisualize& right, int delayMs)
 {
-    throw std::runtime_error("Camera mode called guide-light visualization");
+    ++guideShows;
+    require(delayMs > 0, "Continuous guide-light visualization must not wait indefinitely");
+    require(detectionCalls == guideShows, "Guide-light visualization ran before detection");
+    require(left.frame.frame_id == 2 && right.frame.frame_id == 9,
+            "Guide-light visualization received mismatched frames");
+    require(left.targets.size() == (emptyResults ? 0u : 1u) && right.targets.empty(),
+            "Guide-light visualization lost empty/failed results");
+    if (!emptyResults)
+        require(!left.targets.front().success, "Failed detection displayed as successful");
 }
 
 int main(int argc, char** argv)
@@ -109,7 +117,7 @@ int main(int argc, char** argv)
             reset();
             emptyResults = empty;
             require(runCameraMode(config) == 0, "Camera mode did not stop normally");
-            require(yoloLoads == 1 && yoloCalls == 1 && detectionCalls == 1 && yoloShows == 1,
+            require(yoloLoads == 1 && yoloCalls == 1 && detectionCalls == 1 && yoloShows == 1 && guideShows == 1,
                     "Perception/visualization not completed once");
             require(!active && stopCalls >= 1, "Camera not stopped on normal exit");
             const auto restored = std::signal(SIGINT, priorSignalHandler);

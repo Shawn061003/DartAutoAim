@@ -5,7 +5,7 @@ cmake_minimum_required(VERSION 3.16)
 option(DART_BUILD_MAIN "Build the dart vision main program" ON)
 option(DART_BUILD_CONTROL_DEMO "Build the manual MCU serial demo" ON)
 option(DART_BUILD_YOLO "Build OpenVINO YOLO inference and tests" ON)
-option(DART_BUILD_HSV_TUNER "Build YOLO ROI HSV tuner (requires DART_BUILD_YOLO)" ON)
+option(DART_BUILD_HSV_TUNER "Build YOLO ROI green-difference tuner (requires DART_BUILD_YOLO)" ON)
 option(DART_BUILD_CALIBRATION "Build standalone monocular and stereo calibration" ON)
 
 # 主程序的图片检测链调用 YOLO；关闭该模块时须同时关闭主程序。
@@ -44,7 +44,7 @@ target_include_directories(dart_mcu_protocol INTERFACE
 )
 target_compile_features(dart_mcu_protocol INTERFACE cxx_std_17)
 
-# 主程序与HSV工具共用配置、图片采集及可视化模块。
+# 主程序与差分调参工具共用配置、图片采集及可视化模块。
 if(DART_BUILD_MAIN OR (DART_BUILD_HSV_TUNER AND DART_BUILD_YOLO))
     find_package(OpenCV REQUIRED COMPONENTS core imgcodecs imgproc highgui)
     find_package(Threads REQUIRED)
@@ -135,13 +135,19 @@ if(DART_BUILD_MAIN)
         target_link_libraries(dart_config_test PRIVATE dart::config)
         add_test(NAME dart_config COMMAND dart_config_test
             ${CMAKE_CURRENT_SOURCE_DIR}/config/dart.yaml
-            ${CMAKE_CURRENT_BINARY_DIR}/config_fixtures)
+            ${CMAKE_CURRENT_SOURCE_DIR}/outputs/config_fixtures)
 
         add_executable(dart_guide_light_test
             tests/test_guide_light_detect.cpp src/Perception/GuideLightDetect.cpp)
         target_include_directories(dart_guide_light_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${OpenCV_INCLUDE_DIRS})
         target_link_libraries(dart_guide_light_test PRIVATE opencv_core opencv_imgproc)
         add_test(NAME guide_light COMMAND dart_guide_light_test)
+
+        add_executable(dart_green_contours_test
+            tests/test_green_contours.cpp src/Perception/GuideLightDetect.cpp)
+        target_include_directories(dart_green_contours_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${OpenCV_INCLUDE_DIRS})
+        target_link_libraries(dart_green_contours_test PRIVATE opencv_core opencv_imgproc)
+        add_test(NAME green_contours COMMAND dart_green_contours_test)
 
         add_executable(dart_visualization_test tests/test_visualization.cpp)
         target_link_libraries(dart_visualization_test PRIVATE dart::visualization opencv_imgcodecs)
@@ -194,7 +200,7 @@ if(DART_BUILD_YOLO)
     endif()
 endif()
 
-# 双相机HSV调参工具：仅允许YAML的image模式，复用可视化，运行时不写结果文件。
+# 双相机差分调参工具：仅允许YAML的image模式，复用可视化，运行时不写结果文件。
 if(DART_BUILD_HSV_TUNER AND DART_BUILD_YOLO)
     find_package(OpenCV REQUIRED COMPONENTS core imgproc imgcodecs highgui)
     add_executable(dart_hsv_tuner tests/test_hsv_tuner.cpp src/Perception/GuideLightDetect.cpp)

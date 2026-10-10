@@ -188,27 +188,22 @@ YOLOParams readYOLO(const cv::FileNode& node, const std::filesystem::path& base)
     return result;
 }
 
-cv::Scalar readHSV(const cv::FileNode& node, const char* key)
+// 读取单通道差分阈值；范围和上下界顺序由GuideLightParams统一校验。
+double readDifferenceBound(const cv::FileNode& node, const char* key)
 {
-    const auto values = required(node, key, "guide_light");
-    const std::string field = std::string("guide_light.") + key;
-    if (!values.isSeq() || values.size() != 3) invalid(field, "expected [H,S,V]");
-    cv::Scalar result;
-    for (int i = 0; i < 3; ++i) {
-        const auto value = values[i];
-        if (!value.isInt() && !value.isReal()) invalid(field, "expected numeric HSV values");
-        result[i] = static_cast<double>(value);
-    }
-    return result;
+    const auto value = required(node, key, "guide_light");
+    if (!value.isInt() && !value.isReal())
+        invalid(std::string("guide_light.") + key, "expected a numeric difference bound");
+    return static_cast<double>(value);
 }
 
 GuideLightParams readGuideLight(const cv::FileNode& node)
 {
     GuideLightParams result;
-    result.leftHsvLower = readHSV(node, "left_hsv_lower");
-    result.leftHsvUpper = readHSV(node, "left_hsv_upper");
-    result.rightHsvLower = readHSV(node, "right_hsv_lower");
-    result.rightHsvUpper = readHSV(node, "right_hsv_upper");
+    result.leftDiffLower = readDifferenceBound(node, "left_diff_lower");
+    result.leftDiffUpper = readDifferenceBound(node, "left_diff_upper");
+    result.rightDiffLower = readDifferenceBound(node, "right_diff_lower");
+    result.rightDiffUpper = readDifferenceBound(node, "right_diff_upper");
     result.validate();
     return result;
 }

@@ -51,25 +51,21 @@ struct YOLOParams {
 };
 
 struct GuideLightParams {
-    cv::Scalar rightHsvLower{60, 102, 81};
-    cv::Scalar rightHsvUpper{86, 212, 255};
-    cv::Scalar leftHsvLower{61, 210, 140};
-    cv::Scalar leftHsvUpper{74, 230, 240};
+    double rightDiffLower = 0.0;
+    double rightDiffUpper = 255.0;
+    double leftDiffLower = 0.0;
+    double leftDiffUpper = 255.0;
 
-    // 两侧分别校验；OpenCV 8位HSV：H为0..179，S/V为0..255，包含上下界。
+    // 差分D=G-(R+B)/2，阈值范围[-255,255]；筛选区间为(lower,upper]，支持小数。
     void validate() const {
-        const auto check = [](const cv::Scalar& lower, const cv::Scalar& upper, const char* side) {
-            for (int i = 0; i < 3; ++i) {
-                const double maximum = i == 0 ? 179 : 255;
-                if (!std::isfinite(lower[i]) || !std::isfinite(upper[i]) ||
-                    lower[i] < 0 || upper[i] > maximum || lower[i] > upper[i] ||
-                    std::floor(lower[i]) != lower[i] || std::floor(upper[i]) != upper[i])
-                    throw std::invalid_argument(std::string("guide_light ") + side +
-                        " HSV: expected ordered integer bounds in H[0,179], S/V[0,255]");
-            }
+        const auto check = [](double lower, double upper, const char* side) {
+            if (!std::isfinite(lower) || !std::isfinite(upper) ||
+                lower < -255.0 || upper > 255.0 || lower > upper)
+                throw std::invalid_argument(std::string("guide_light ") + side +
+                    " difference: expected ordered finite bounds in [-255,255]");
         };
-        check(leftHsvLower, leftHsvUpper, "left");
-        check(rightHsvLower, rightHsvUpper, "right");
+        check(leftDiffLower, leftDiffUpper, "left");
+        check(rightDiffLower, rightDiffUpper, "right");
     }
 };
 

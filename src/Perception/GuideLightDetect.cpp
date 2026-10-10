@@ -13,8 +13,8 @@
 #include <utility>
 
 GuideLightDetect::GuideLightDetect(const GuideLightParams& params)
-    : right_hsv_lower_(params.rightHsvLower), right_hsv_upper_(params.rightHsvUpper),
-      left_hsv_lower_(params.leftHsvLower), left_hsv_upper_(params.leftHsvUpper)
+    : right_diff_lower_(params.rightDiffLower), right_diff_upper_(params.rightDiffUpper),
+      left_diff_lower_(params.leftDiffLower), left_diff_upper_(params.leftDiffUpper)
 {
     params.validate();
 }
@@ -29,6 +29,10 @@ GuideLightDetect::StereoDetectResult GuideLightDetect::RunDetection(
                                    const YOLOInference::YOLOResults& targets) {
         DetectResult detections;
         detections.reserve(targets.size());
+        if (targets.empty()) return detections;
+
+        // 每侧每帧只计算一次单通道差分全图，供该侧所有ROI提取轮廓。
+        const cv::Mat greenImage = GetGreenDifference(frame.image, frame.camera_side);
         for (const auto& target : targets) {
             if (target.camera_side != frame.camera_side)
                 throw std::invalid_argument("YOLO result camera_side does not match its CameraFrame");
@@ -37,7 +41,7 @@ GuideLightDetect::StereoDetectResult GuideLightDetect::RunDetection(
             detection.frame_id = frame.frame_id;
             detection.timestamp_ms = frame.timestamp_ms;
             detection.camera_side = frame.camera_side;
-            detection.contours = GetContours(frame.image, target.roi, frame.camera_side);
+            detection.contours = GetContours(greenImage, target.roi, frame.camera_side);
             detection.CenterPoint = GetCenterPoint(detection.contours);
             if (std::isfinite(detection.CenterPoint.x)
                 && std::isfinite(detection.CenterPoint.y)) {
@@ -55,21 +59,43 @@ GuideLightDetect::StereoDetectResult GuideLightDetect::RunDetection(
     return detections;
 }
 
+cv::Mat GuideLightDetect::GetGreenDifference(const cv::Mat& image, CameraSide /*side*/)
+{
+    if (image.empty() || image.type() != CV_8UC3)
+        throw std::invalid_argument("Green difference requires a nonempty CV_8UC3 BGR image");
+
+    // 直接写入独立的浮点单通道图，避免8位运算截断负值或丢失半整数。
+    cv::Mat difference(image.size(), CV_32FC1);
+    for (int y = 0; y < image.rows; ++y) {
+        const auto* source = image.ptr<cv::Vec3b>(y);
+        auto* output = difference.ptr<float>(y);
+        for (int x = 0; x < image.cols; ++x) {
+            const auto& bgr = source[x];
+            output[x] = static_cast<float>(bgr[1]) - 0.5f * (bgr[2] + bgr[0]);
+        }
+    }
+    return difference;
+}
+
 std::vector<cv::Point2f> GuideLightDetect::GetContours(
     const cv::Mat& image, const cv::Rect& roi, CameraSide side)
 {
-    // 1. 在ROI内进行HSV筛选，得到高亮绿色区域的二值掩膜。
-    cv::Mat hsv, mask;
-    cv::cvtColor(image(roi), hsv, cv::COLOR_BGR2HSV);
-    const auto& lower = side == CameraSide::Left ? left_hsv_lower_ : right_hsv_lower_;
-    const auto& upper = side == CameraSide::Left ? left_hsv_upper_ : right_hsv_upper_;
-    cv::inRange(hsv, lower, upper, mask);
+    // 1. 输入已是浮点单通道差分全图，直接取出ROI。
+    const cv::Mat difference = image(roi);
 
-    // 2. 只提取外轮廓，保留全部边界像素，供后续中心估计使用。
+    // 2. 按相机侧别选择差分区间(lower,upper]，生成8位二值掩膜。
+    const double lower = side == CameraSide::Left ? left_diff_lower_ : right_diff_lower_;
+    const double upper = side == CameraSide::Left ? left_diff_upper_ : right_diff_upper_;
+    cv::Mat mask, upperMask;
+    cv::compare(difference, lower, mask, cv::CMP_GT);
+    cv::compare(difference, upper, upperMask, cv::CMP_LE);
+    cv::bitwise_and(mask, upperMask, mask);
+
+    // 3. 只提取外轮廓，保留全部边界像素，供后续中心估计使用。
     std::vector<std::vector<cv::Point>> candidates;
     cv::findContours(mask, candidates, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_NONE);
 
-    // 3. 圆度为4*pi*面积/周长平方，取圆度最高的候选。
+    // 4. 圆度为4*pi*面积/周长平方，取圆度最高的候选。
     const std::vector<cv::Point>* bestContour = nullptr;
     double bestCircularity = 0.0;
     for (const auto& contour : candidates) {
@@ -86,7 +112,7 @@ std::vector<cv::Point2f> GuideLightDetect::GetContours(
         }
     }
 
-    // 4. 无有效候选时返回空集合；否则恢复为全图坐标。
+    // 5. 无有效候选时返回空集合；否则恢复为全图坐标。
     std::vector<cv::Point2f> result;
     if (bestContour == nullptr) {
         return result;

@@ -26,32 +26,38 @@ void checkIndependentBounds()
     YOLOInference::StereoYOLOResult rois{
         {{{20, 20, 40, 40}, .9, 10, 100, CameraSide::Left}},
         {{{70, 50, 40, 40}, .8, 11, 101, CameraSide::Right}}};
-    const Bounds green{60, 102, 81, 86, 212, 255};
-    const Bounds red{0, 102, 81, 10, 212, 255};
-    const auto baseline = detectPair(frame, rois, green, green);
+    const Bounds included{0.0, 120.0};
+    const Bounds excluded{120.0, 255.0};
+    const auto baseline = detectPair(frame, rois, included, included);
     require(success(baseline.left) && success(baseline.right), "Baseline failed.");
     require(baseline.left[0].camera_side == CameraSide::Left
             && baseline.right[0].camera_side == CameraSide::Right, "Tuner lost camera provenance.");
-    const auto changeLeft = detectPair(frame, rois, red, green);
+    const auto changeLeft = detectPair(frame, rois, excluded, included);
     require(!success(changeLeft.left) && success(changeLeft.right), "Left bounds leaked into right.");
     require(changeLeft.right[0].contours == baseline.right[0].contours
             && changeLeft.right[0].CenterPoint == baseline.right[0].CenterPoint,
             "Right result changed with left-only tuning.");
-    const auto changeRight = detectPair(frame, rois, green, red);
+    const auto changeRight = detectPair(frame, rois, included, excluded);
     require(success(changeRight.left) && !success(changeRight.right), "Right bounds leaked into left.");
     require(changeRight.left[0].contours == baseline.left[0].contours,
             "Left contour changed with right-only tuning.");
     const auto canvas = drawPair(frame, changeRight);
     require(canvas.size() == cv::Size(1280, 532), "Existing visualization was not used.");
-    const auto empty = detectPair(frame, {}, green, red);
+    const auto empty = detectPair(frame, {}, included, excluded);
     require(empty.left.empty() && empty.right.empty(), "No-ROI results were fabricated.");
     require(!drawPair(frame, empty).empty(), "No-ROI view failed.");
-    require(toBounds(toParams(green, red), CameraSide::Left) == green
-            && toBounds(toParams(green, red), CameraSide::Right) == red, "HSV channel order changed.");
+    require(toBounds(toParams(included, excluded), CameraSide::Left) == included
+            && toBounds(toParams(included, excluded), CameraSide::Right) == excluded, "Difference bound order changed.");
+    const Bounds fractional{-10.5, 120.5};
+    require(toBounds(toParams(fractional, included), CameraSide::Left) == fractional,
+            "Fractional difference bounds were lost.");
+    require(sliderPosition(-255.0) == 0 && sliderPosition(0.0) == 510 &&
+            sliderPosition(0.5) == 511 && sliderPosition(255.0) == 1020,
+            "Difference slider scale changed.");
     bool rejected = false;
-    try { toParams({86, 102, 81, 60, 212, 255}, green); }
+    try { toParams({120.0, 119.5}, included); }
     catch (const std::invalid_argument&) { rejected = true; }
-    require(rejected, "Crossed HSV bounds were accepted.");
+    require(rejected, "Crossed difference bounds were accepted.");
 }
 
 void checkModeGuard(const std::filesystem::path& directory)
@@ -79,7 +85,7 @@ void checkModeGuard(const std::filesystem::path& directory)
              << "   input_size: 512\n   tile_overlap_px: 30\n"
              << "   left_padding_px: 25\n   right_padding_px: 10\n"
              << "   confidence_threshold: 0.25\n   nms_iou_threshold: 0.45\n   warmup_count: 1\n"
-             << "guide_light:\n   left_hsv_lower: [61, 210, 140]\n   left_hsv_upper: [74, 230, 240]\n   right_hsv_lower: [60, 102, 81]\n   right_hsv_upper: [86, 212, 255]\n";
+             << "guide_light:\n   left_diff_lower: 0.\n   left_diff_upper: 255.\n   right_diff_lower: 0.\n   right_diff_upper: 255.\n";
         file.close();
         require(bool(file), "Cannot create mode fixture.");
         bool rejected = false;
@@ -98,15 +104,15 @@ int main(int argc, char** argv)
         require(argc == 3, "Expected config path and fixture directory.");
         checkIndependentBounds();
         checkModeGuard(argv[2]);
-        const auto config = loadImageConfig(argv[1]);
+        const DartCongfig config(argv[1]);
         const auto left = toBounds(config.guideLight, CameraSide::Left);
         const auto right = toBounds(config.guideLight, CameraSide::Right);
         const auto restored = toParams(left, right);
-        require(restored.leftHsvLower == config.guideLight.leftHsvLower
-                && restored.leftHsvUpper == config.guideLight.leftHsvUpper
-                && restored.rightHsvLower == config.guideLight.rightHsvLower
-                && restored.rightHsvUpper == config.guideLight.rightHsvUpper,
-                "Per-camera YAML HSV initialization changed.");
+        require(restored.leftDiffLower == config.guideLight.leftDiffLower
+                && restored.leftDiffUpper == config.guideLight.leftDiffUpper
+                && restored.rightDiffLower == config.guideLight.rightDiffLower
+                && restored.rightDiffUpper == config.guideLight.rightDiffUpper,
+                "Per-camera YAML difference initialization changed.");
         char name[] = "dart_hsv_tuner";
         char flag[] = "--config";
         char check[] = "--check";
@@ -114,7 +120,7 @@ int main(int argc, char** argv)
         const auto options = parseOptions(4, args);
         require(options.checkOnly && options.configPath == argv[1], "CLI did not select YAML.");
         // 实际图片的读取、YOLO推理和左右可视化单独由--check验证，不依赖GUI。
-        std::cout << "HSV tuner checks passed.\n";
+        std::cout << "Difference tuner checks passed.\n";
         return 0;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
