@@ -66,6 +66,7 @@ private:
     cv::Mat GetGreenDifference(const cv::Mat& image, CameraSide side);
 
     /// @brief 在单个ROI内保留差分下界<D<=上界的像素，并选取圆度最高的有效外轮廓。
+    /// @note 候选轮廓面积须严格大于直径15像素圆的面积，约176.7像素平方，再比较圆度。
     /// @param image 已由GetGreenDifference生成的CV_32FC1单通道差分全图。
     /// @param roi YOLO提供的有效全图区域。
     /// @param side 来源相机，用于选择该侧的差分上下界。

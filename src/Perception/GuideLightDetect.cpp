@@ -95,16 +95,16 @@ std::vector<cv::Point2f> GuideLightDetect::GetContours(
     std::vector<std::vector<cv::Point>> candidates;
     cv::findContours(mask, candidates, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_NONE);
 
-    // 4. 圆度为4*pi*面积/周长平方，取圆度最高的候选。
+    // 4. 轮廓面积须大于直径15像素圆的面积，再按4*pi*面积/周长平方比较圆度。
+    constexpr double minDiameter = 15.0;
+    constexpr double minContourArea = CV_PI * minDiameter * minDiameter / 4.0;
     const std::vector<cv::Point>* bestContour = nullptr;
     double bestCircularity = 0.0;
     for (const auto& contour : candidates) {
         const double area = cv::contourArea(contour);
+        if (area <= minContourArea) continue;
         const double perimeter = cv::arcLength(contour, true);
-        // 单点、线段等退化轮廓不能用于后续圆形目标的中心估计。
-        if (area <= 0.0 || perimeter <= 0.0) {
-            continue;
-        }
+        if (perimeter <= 0.0) continue;
         const double circularity = 4.0 * CV_PI * area / (perimeter * perimeter);
         if (circularity > bestCircularity) {
             bestCircularity = circularity;

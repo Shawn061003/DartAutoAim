@@ -17,10 +17,44 @@ void Require(bool ok, const char* message)
     if (!ok) throw std::runtime_error(message);
 }
 
+void CheckMinimumArea(GuideLightDetect& detector)
+{
+    const cv::Rect roi(10, 15, 100, 90);
+    const cv::Point center(70, 65);
+    cv::Mat image = cv::Mat::zeros(120, 140, CV_32FC1);
+    // 细长椭圆面积合格；2x2噪点圆度更高，用于复现候选被抢占的场景。
+    cv::ellipse(image, center, {18, 7}, 0, 0, 360, 100.0, cv::FILLED);
+    const auto clean = GuideLightDetectTestAccess::Contours(detector, image, roi, CameraSide::Left);
+    Require(clean.size() >= 5 && cv::contourArea(clean) > 176.715,
+            "Area-qualified target fixture failed.");
+    image(cv::Rect(25, 30, 2, 2)).setTo(100.0);
+    for (CameraSide side : {CameraSide::Left, CameraSide::Right}) {
+        const auto withNoise = GuideLightDetectTestAccess::Contours(detector, image, roi, side);
+        Require(withNoise == clean, "A 2x2 noise blob displaced the area-qualified target.");
+    }
+    image.setTo(0);
+    image(cv::Rect(25, 30, 2, 2)).setTo(100.0);
+    Require(GuideLightDetectTestAccess::Contours(detector, image, roi, CameraSide::Left).empty(),
+            "Noise-only ROI produced a usable contour.");
+
+    // 17x12像素矩形的轮廓面积为16x11=176，低于直径15像素圆的面积。
+    image.setTo(0);
+    image(cv::Rect(25, 30, 17, 12)).setTo(100.0);
+    Require(GuideLightDetectTestAccess::Contours(detector, image, roi, CameraSide::Left).empty(),
+            "Contour area 176 passed the minimum-area gate.");
+    // 14x15像素矩形的轮廓面积为13x14=182，应通过面积筛选。
+    image.setTo(0);
+    image(cv::Rect(25, 30, 14, 15)).setTo(100.0);
+    const auto above = GuideLightDetectTestAccess::Contours(detector, image, roi, CameraSide::Left);
+    Require(!above.empty() && cv::contourArea(above) == 182.0,
+            "Contour area 182 was rejected by the minimum-area gate.");
+}
+
 int main()
 {
     try {
         GuideLightDetect detector;
+        CheckMinimumArea(detector);
         const cv::Rect roi(35, 25, 50, 50);
         const cv::Point center(60, 50);
         cv::Mat difference = cv::Mat::zeros(100, 140, CV_32FC1);

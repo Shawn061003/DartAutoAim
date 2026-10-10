@@ -81,7 +81,7 @@ int main()
         const cv::Point2f leftCenter(40.5f, 50.5f), rightCenter(110.5f, 80.5f);
         DrawDisk(left.image, leftCenter, 9, {56, 200, 27}); // 差分D=158.5，验证浮点分割
         DrawDisk(right.image, rightCenter, 11);
-        // 2x2方块的外轮廓只有4点：轮廓可提取，但不能拟合椭圆。
+        // 2x2噪点面积不足，轮廓筛选后返回FAILED和空轮廓。
         right.image(cv::Rect(11, 11, 2, 2)).setTo(cv::Scalar(80, 200, 80));
         const auto originalLeft = left.image.clone();
         const auto originalRight = right.image.clone();
@@ -98,7 +98,7 @@ int main()
         CheckResult(result.right[0], right, yolo.right[0].roi, true);
         CheckResult(result.right[1], right, yolo.right[1].roi, false);
         Require(result.left[0].contours.empty(), "Blank ROI produced a contour.");
-        Require(result.right[1].contours.size() == 4, "Failed fit lost its diagnostic contour.");
+        Require(result.right[1].contours.empty(), "Small noise survived the contour area gate.");
         Require(cv::norm(result.left[1].CenterPoint - leftCenter) < 0.05,
                 "Left center lost its global offset or fractional coordinates.");
         Require(cv::norm(result.right[0].CenterPoint - rightCenter) < 0.05,
