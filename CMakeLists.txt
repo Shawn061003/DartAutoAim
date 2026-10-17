@@ -20,7 +20,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-# 实时单目标定使用海康SDK；双目标定仍读取图片和单目标定结果。
+# 实时单目/双目标定使用海康SDK；双目程序保留离线图片入口。
 if(DART_BUILD_CALIBRATION)
     find_package(OpenCV REQUIRED COMPONENTS core imgproc imgcodecs calib3d highgui aruco)
     set(_dart_interactive_calibration_sources
@@ -32,10 +32,10 @@ if(DART_BUILD_CALIBRATION)
     target_link_libraries(demarcate PRIVATE opencv_core opencv_imgproc opencv_imgcodecs opencv_calib3d opencv_highgui opencv_aruco)
     target_compile_definitions(demarcate PRIVATE DART_PROJECT_ROOT="${CMAKE_CURRENT_SOURCE_DIR}")
     target_compile_options(demarcate PRIVATE -Wall -Wextra -Wpedantic)
-    # 双目标定读取原图和单目参数，输出一个YAML和一张校正参考图。
-    add_executable(stereo_calibrate tests/stereo_calibrate.cpp)
+    # 双目标定固定两侧内参，支持不同原生尺寸；SDK实时采样和离线图片共用求解约定。
+    add_executable(stereo_calibrate sub_module/stereo_calibrate.cpp)
     target_include_directories(stereo_calibrate PRIVATE ${OpenCV_INCLUDE_DIRS})
-    target_link_libraries(stereo_calibrate PRIVATE opencv_core opencv_imgproc opencv_imgcodecs opencv_calib3d)
+    target_link_libraries(stereo_calibrate PRIVATE opencv_core opencv_imgproc opencv_imgcodecs opencv_calib3d opencv_highgui)
     target_compile_options(stereo_calibrate PRIVATE -Wall -Wextra -Wpedantic)
     target_compile_definitions(stereo_calibrate PRIVATE DART_PROJECT_ROOT="${CMAKE_CURRENT_SOURCE_DIR}")
 endif()
@@ -120,6 +120,7 @@ endif()
 # 实时标定可在关闭主程序、YOLO和调参工具时单独构建。
 if(DART_BUILD_CALIBRATION)
     target_link_libraries(demarcate PRIVATE dart::config dart::camera)
+    target_link_libraries(stereo_calibrate PRIVATE dart::config dart::camera)
     if(BUILD_TESTING)
         add_executable(dart_live_calibration_test tests/test_live_calibration.cpp ${_dart_interactive_calibration_sources})
         target_include_directories(dart_live_calibration_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${OpenCV_INCLUDE_DIRS})
@@ -129,6 +130,14 @@ if(DART_BUILD_CALIBRATION)
             opencv_calib3d opencv_imgcodecs opencv_imgproc opencv_highgui opencv_aruco)
         add_test(NAME live_calibration COMMAND dart_live_calibration_test)
         set_tests_properties(live_calibration PROPERTIES TIMEOUT 60)
+
+        add_executable(dart_live_stereo_calibration_test tests/test_live_stereo_calibration.cpp)
+        target_compile_definitions(dart_live_stereo_calibration_test PRIVATE DART_PROJECT_ROOT="${CMAKE_CURRENT_SOURCE_DIR}")
+        target_compile_options(dart_live_stereo_calibration_test PRIVATE -Wall -Wextra -Wpedantic)
+        target_link_libraries(dart_live_stereo_calibration_test PRIVATE dart::config dart::camera
+            opencv_calib3d opencv_imgproc opencv_imgcodecs opencv_highgui)
+        add_test(NAME live_stereo_calibration COMMAND dart_live_stereo_calibration_test)
+        set_tests_properties(live_stereo_calibration PROPERTIES TIMEOUT 90)
     endif()
 endif()
 
