@@ -20,12 +20,17 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-# 单目/双目标定独立编译，支持不同 ROI；可执行文件直接放在 build 中。
+# 实时单目标定使用海康SDK；双目标定仍读取图片和单目标定结果。
 if(DART_BUILD_CALIBRATION)
-    find_package(OpenCV REQUIRED COMPONENTS core imgproc imgcodecs calib3d)
-    add_executable(demarcate sub_module/demarcate.cpp)
+    find_package(OpenCV REQUIRED COMPONENTS core imgproc imgcodecs calib3d highgui aruco)
+    set(_dart_interactive_calibration_sources
+        sub_module/opencv_interactive_calibration/calibController.cpp
+        sub_module/opencv_interactive_calibration/frameProcessor.cpp
+        sub_module/opencv_interactive_calibration/rotationConverters.cpp)
+    add_executable(demarcate sub_module/demarcate.cpp ${_dart_interactive_calibration_sources})
     target_include_directories(demarcate PRIVATE ${OpenCV_INCLUDE_DIRS})
-    target_link_libraries(demarcate PRIVATE opencv_core opencv_imgproc opencv_imgcodecs opencv_calib3d)
+    target_link_libraries(demarcate PRIVATE opencv_core opencv_imgproc opencv_imgcodecs opencv_calib3d opencv_highgui opencv_aruco)
+    target_compile_definitions(demarcate PRIVATE DART_PROJECT_ROOT="${CMAKE_CURRENT_SOURCE_DIR}")
     target_compile_options(demarcate PRIVATE -Wall -Wextra -Wpedantic)
     # 双目标定读取原图和单目参数，输出一个YAML和一张校正参考图。
     add_executable(stereo_calibrate tests/stereo_calibrate.cpp)
@@ -45,7 +50,7 @@ target_include_directories(dart_mcu_protocol INTERFACE
 target_compile_features(dart_mcu_protocol INTERFACE cxx_std_17)
 
 # 主程序与差分调参工具共用配置、图片采集及可视化模块。
-if(DART_BUILD_MAIN OR (DART_BUILD_HSV_TUNER AND DART_BUILD_YOLO))
+if(DART_BUILD_MAIN OR DART_BUILD_CALIBRATION OR (DART_BUILD_HSV_TUNER AND DART_BUILD_YOLO))
     find_package(OpenCV REQUIRED COMPONENTS core imgcodecs imgproc highgui)
     find_package(Threads REQUIRED)
 
@@ -110,6 +115,21 @@ if(DART_BUILD_MAIN OR (DART_BUILD_HSV_TUNER AND DART_BUILD_YOLO))
     target_link_libraries(dart_visualization PUBLIC opencv_core PRIVATE opencv_imgproc opencv_highgui)
     target_compile_options(dart_visualization PRIVATE -Wall -Wextra -Wpedantic)
 
+endif()
+
+# 实时标定可在关闭主程序、YOLO和调参工具时单独构建。
+if(DART_BUILD_CALIBRATION)
+    target_link_libraries(demarcate PRIVATE dart::config dart::camera)
+    if(BUILD_TESTING)
+        add_executable(dart_live_calibration_test tests/test_live_calibration.cpp ${_dart_interactive_calibration_sources})
+        target_include_directories(dart_live_calibration_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${OpenCV_INCLUDE_DIRS})
+        target_compile_definitions(dart_live_calibration_test PRIVATE DART_PROJECT_ROOT="${CMAKE_CURRENT_SOURCE_DIR}")
+        target_compile_options(dart_live_calibration_test PRIVATE -Wall -Wextra -Wpedantic)
+        target_link_libraries(dart_live_calibration_test PRIVATE dart::config dart::camera
+            opencv_calib3d opencv_imgcodecs opencv_imgproc opencv_highgui opencv_aruco)
+        add_test(NAME live_calibration COMMAND dart_live_calibration_test)
+        set_tests_properties(live_calibration PROPERTIES TIMEOUT 60)
+    endif()
 endif()
 
 # 主程序：从YAML选择模式，完成采集、检测及相机模式的双目测距。
