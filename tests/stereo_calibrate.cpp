@@ -1,5 +1,6 @@
 // 双目标定：读取原图、固定已标定的 K/D，求 X_right = R * X_left + T。
 // 用法：stereo_calibrate [left_dir right_dir output_dir [left_yaml right_yaml]]
+// 全幅模式：stereo_calibrate --full-frame left_image_dir right_image_dir output_dir [left_yaml right_yaml]
 // 输出目录必须不存在。退出码：0=通过基本质量检查，2=已保存诊断结果但质量不合格，1=程序错误。
 // 采集前提：相机之间的位姿固定，且每对左右图中的棋盘必须保持同一位姿。
 #include <opencv2/opencv.hpp>
@@ -21,10 +22,15 @@ namespace {
 constexpr int kColumns = 11, kRows = 8;
 constexpr float kSquareMm = 30.F;
 const cv::Size kFrameSize(1440, 1080);
-struct Group { std::string label; cv::Point2f leftOffset; bool offsetConfirmed = true; };
+struct Group {
+    std::string label;
+    cv::Point2f leftOffset;
+    bool offsetConfirmed = true;
+    cv::Size leftSize = kFrameSize;
+};
 // 在这里设置各组左相机拍摄时的真实 OffsetX/OffsetY。
 // 右侧同名分组仅用于配对，右相机偏移始终为(0,0)。
-const std::vector<Group> kGroups{
+std::vector<Group> kGroups{
     {"1500-1400", {1500.F, 1400.F}},
     {"2000-1300", {2000.F, 1300.F}},
     {"2600-1400", {2600.F, 1400.F}, false},
@@ -52,10 +58,12 @@ Camera ReadCamera(const fs::path& path) {
     Require(std::abs(c.K.at<double>(2,2) - 1.) < 1e-9, "Invalid homogeneous intrinsics");
     return c;
 }
-cv::Mat ReadImage(const fs::path& path) {
+cv::Mat ReadImage(const fs::path& path, cv::Size expected = kFrameSize, bool allowUnreadable = false) {
     auto image = cv::imread(path.string(), cv::IMREAD_COLOR | cv::IMREAD_IGNORE_ORIENTATION);
-    Require(!image.empty() && image.size() == kFrameSize,
-            "Expected raw 1440x1080 image: " + path.string());
+    if (image.empty() && allowUnreadable) return {};
+    Require(!image.empty(), "Cannot decode image: " + path.string());
+    Require(image.size() == expected,
+            "Expected raw " + std::to_string(expected.width) + "x" + std::to_string(expected.height) + " image: " + path.string());
     return image;
 }
 std::map<int, fs::path> IndexFiles(const fs::path& dir, const std::string& side) {
@@ -74,15 +82,33 @@ std::map<int, fs::path> IndexFiles(const fs::path& dir, const std::string& side)
 }
 bool Detect(const cv::Mat& image, std::vector<cv::Point2f>& points) {
     cv::Mat gray; cv::cvtColor(image, gray, cv::COLOR_BGR2GRAY);
-    bool found = cv::findChessboardCornersSB(gray, {kColumns, kRows}, points,
+    cv::Rect search(0,0,gray.cols,gray.rows);
+    // 全幅图先低分辨率定位棋盘，再回到原分辨率局部重检，最终角点未经缩放。
+    if (gray.cols > 2000 || gray.rows > 2000) {
+        const double scale=1600./std::max(gray.cols,gray.rows);
+        cv::Mat coarse; cv::resize(gray,coarse,{},scale,scale,cv::INTER_AREA);
+        std::vector<cv::Point2f> initial;
+        if (cv::findChessboardCornersSB(coarse,{kColumns,kRows},initial,
+            cv::CALIB_CB_NORMALIZE_IMAGE | cv::CALIB_CB_EXHAUSTIVE | cv::CALIB_CB_ACCURACY)) {
+            for (auto& p:initial) { p.x*=static_cast<float>(gray.cols)/coarse.cols; p.y*=static_cast<float>(gray.rows)/coarse.rows; }
+            auto box=cv::boundingRect(initial);
+            const int margin=std::max(64, std::max(box.width,box.height)/4);
+            search=cv::Rect(box.x-margin,box.y-margin,box.width+2*margin,box.height+2*margin)&search;
+        }
+    }
+    const auto region=gray(search);
+    bool found = cv::findChessboardCornersSB(region, {kColumns, kRows}, points,
         cv::CALIB_CB_NORMALIZE_IMAGE | cv::CALIB_CB_EXHAUSTIVE | cv::CALIB_CB_ACCURACY);
     if (!found) {
         points.clear();
-        found = cv::findChessboardCorners(gray, {kColumns, kRows}, points,
+        found = cv::findChessboardCorners(region, {kColumns, kRows}, points,
             cv::CALIB_CB_ADAPTIVE_THRESH | cv::CALIB_CB_NORMALIZE_IMAGE);
     }
-    if (found) cv::cornerSubPix(gray, points, {7,7}, {-1,-1},
-        {cv::TermCriteria::COUNT | cv::TermCriteria::EPS, 50, .001});
+    if (found) {
+        for (auto& p:points) p+=cv::Point2f(static_cast<float>(search.x),static_cast<float>(search.y));
+        cv::cornerSubPix(gray, points, {7,7}, {-1,-1},
+            {cv::TermCriteria::COUNT | cv::TermCriteria::EPS, 50, .001});
+    }
     return found && points.size() == kColumns * kRows;
 }
 struct Pair {
@@ -145,6 +171,53 @@ cv::Mat ReferenceRow(const Pair& pair, const Rectification& rect,
     cv::Mat combined; cv::vconcat(canvas,rawCanvas,combined);
     return combined;
 }
+cv::Mat FitPanel(const cv::Mat& source) {
+    const double scale=std::min(720./source.cols,540./source.rows);
+    cv::Mat resized, panel(540,720,CV_8UC3,cv::Scalar(20,20,20));
+    cv::resize(source,resized,{},scale,scale,cv::INTER_AREA);
+    resized.copyTo(panel(cv::Rect((720-resized.cols)/2,(540-resized.rows)/2,resized.cols,resized.rows)));
+    return panel;
+}
+
+// 左右尺寸不同：直接在各自去畸变像素坐标下画极线，不把全幅左图当作1440x1080。
+// 展示时裁剪/等比缩放仅影响参考图，不修改K/D、原图或参与拟合的角点。
+cv::Mat FullReferenceRow(const Pair& pair, const Camera& left, const Camera& right,
+                         const cv::Mat& F, const std::string& label) {
+    auto rawLeft=ReadImage(pair.leftPath,left.referenceSize), rawRight=ReadImage(pair.rightPath,right.referenceSize);
+    cv::Mat li,ri; cv::undistort(rawLeft,li,left.K,left.D); cv::undistort(rawRight,ri,right.K,right.D);
+    std::vector<cv::Point2f> pl,pr;
+    cv::undistortPoints(pair.left,pl,left.K,left.D,cv::noArray(),left.K);
+    cv::undistortPoints(pair.right,pr,right.K,right.D,cv::noArray(),right.K);
+    std::vector<cv::Vec3f> linesLeft,linesRight;
+    cv::computeCorrespondEpilines(pr,2,F,linesLeft); cv::computeCorrespondEpilines(pl,1,F,linesRight);
+    const auto drawLine=[](cv::Mat& img,const cv::Vec3f& line,cv::Scalar color) {
+        const double a=line[0],b=line[1],c=line[2];
+        if (std::abs(b)>std::abs(a) && std::abs(b)>1e-12)
+            cv::line(img,{0,cvRound(-c/b)},{img.cols-1,cvRound(-(c+a*(img.cols-1))/b)},color,1);
+        else if(std::abs(a)>1e-12)
+            cv::line(img,{cvRound(-c/a),0},{cvRound(-(c+b*(img.rows-1))/a),img.rows-1},color,1);
+    };
+    for (std::size_t i=0;i<pl.size();++i) {
+        if (i%12==0 || i+1==pl.size()) { drawLine(li,linesLeft[i],{40,190,40}); drawLine(ri,linesRight[i],{40,190,40}); }
+        cv::circle(li,pl[i],3,{0,0,255},1); cv::circle(ri,pr[i],3,{0,0,255},1);
+    }
+    const auto crop=[](const cv::Mat& image,const std::vector<cv::Point2f>& points) {
+        auto box=cv::boundingRect(points); box=cv::Rect(box.x-80,box.y-80,box.width+160,box.height+160)&cv::Rect(0,0,image.cols,image.rows);
+        Require(box.area()>0,"Undistorted board outside source image");
+        return FitPanel(image(box));
+    };
+    cv::Mat canvas(kReferenceRowHeight,1440,CV_8UC3,cv::Scalar(20,20,20));
+    crop(li,pl).copyTo(canvas(cv::Rect(0,50,720,540))); crop(ri,pr).copyTo(canvas(cv::Rect(720,50,720,540)));
+    cv::putText(canvas,label,{10,21},cv::FONT_HERSHEY_SIMPLEX,.55,{255,255,255},1);
+    cv::putText(canvas,"UNDISTORTED CROPS - LEFT | RIGHT; green: epilines; red: corners; NOT stereo-rectified",
+                {10,42},cv::FONT_HERSHEY_SIMPLEX,.43,{200,200,200},1);
+    cv::drawChessboardCorners(rawLeft,{kColumns,kRows},pair.left,true);
+    cv::drawChessboardCorners(rawRight,{kColumns,kRows},pair.right,true);
+    FitPanel(rawLeft).copyTo(canvas(cv::Rect(0,640,720,540))); FitPanel(rawRight).copyTo(canvas(cv::Rect(720,640,720,540)));
+    cv::putText(canvas,"RAW INPUT - LEFT full sensor | RIGHT; aspect ratio preserved; display scales differ",
+                {10,620},cv::FONT_HERSHEY_SIMPLEX,.5,{255,255,255},1);
+    return canvas;
+}
 } // namespace
 
 int main(int argc, char** argv) {
@@ -152,10 +225,13 @@ int main(int argc, char** argv) {
         if (argc == 2 && std::string(argv[1]) == "--help") {
             std::cout << "Usage: " << argv[0]
                 << " [left_dir right_dir NEW_output_dir [left_intrinsics.yaml right_intrinsics.yaml]]\n"
+                << "Use --full-frame before paths for LEFT 5472x3648 / RIGHT 1440x1080, both offsets zero.\n"
                 << "Edit kGroups for LEFT capture offsets; RIGHT offsets are always zero.\n"
                 << "Exit 0: basic checks passed; 2: diagnostics saved but quality failed; 1: error.\n";
             return 0;
         }
+        const bool fullFrame=argc>1 && std::string(argv[1])=="--full-frame";
+        if (fullFrame) { --argc; ++argv; Require(argc==4 || argc==6,"Full-frame mode requires explicit left/right image directories and NEW output directory"); }
         Require(argc == 1 || argc == 4 || argc == 6, "Use --help for arguments");
         const fs::path project(DART_PROJECT_ROOT);
         const fs::path leftDir = argc>=4 ? fs::path(argv[1]) : project/"Input/Calibration/left";
@@ -167,6 +243,7 @@ int main(int argc, char** argv) {
         const Camera left = ReadCamera(leftYaml), right = ReadCamera(rightYaml);
         Require(left.referenceSize == cv::Size(5472,3648) && right.referenceSize == kFrameSize,
                 "Expected LEFT full-sensor 5472x3648 and RIGHT raw 1440x1080 calibration");
+        if (fullFrame) kGroups={{"full_frame",{0,0},true,left.referenceSize}};
         cv::setNumThreads(4);
         std::vector<Pair> pairs;
         std::vector<std::string> rejected;
@@ -174,18 +251,25 @@ int main(int argc, char** argv) {
         // 1. 分组后按数值编号配对；禁止将两组的left0/right0混到一起。
         for (std::size_t g=0; g<kGroups.size(); ++g) {
             const auto& group = kGroups[g];
-            const auto ld=leftDir/("left-"+group.label), rd=rightDir/("right-"+group.label);
+            const auto ld=fullFrame?leftDir:leftDir/("left-"+group.label);
+            const auto rd=fullFrame?rightDir:rightDir/("right-"+group.label);
             if (!fs::exists(ld) && !fs::exists(rd)) continue;
             Require(group.leftOffset.x>=0 && group.leftOffset.y>=0 &&
-                    group.leftOffset.x+kFrameSize.width<=left.referenceSize.width &&
-                    group.leftOffset.y+kFrameSize.height<=left.referenceSize.height, "LEFT ROI outside sensor");
+                    group.leftOffset.x+group.leftSize.width<=left.referenceSize.width &&
+                    group.leftOffset.y+group.leftSize.height<=left.referenceSize.height, "LEFT ROI outside sensor");
             const auto lf=IndexFiles(ld,"left"), rf=IndexFiles(rd,"right");
             Require(lf.size()==rf.size(), "Unmatched frame counts in group "+group.label);
             for (const auto& item : lf) {
                 Require(rf.count(item.first)==1, "Missing right frame "+std::to_string(item.first));
                 ++discovered;
                 Pair p{g,item.first,item.second,rf.at(item.first),{},{},false,0.};
-                const auto li=ReadImage(p.leftPath), ri=ReadImage(p.rightPath);
+                const auto li=ReadImage(p.leftPath,group.leftSize,true), ri=ReadImage(p.rightPath,kFrameSize,true);
+                if (li.empty() || ri.empty()) {
+                    const auto reason=group.label+"/"+std::to_string(item.first)+" (image decode failure: "+
+                                      (li.empty()?"left":"right")+")";
+                    rejected.push_back(reason); std::cerr << "Skipping " << reason << '\n';
+                    continue;
+                }
                 if (!Detect(li,p.left) || !Detect(ri,p.right)) {
                     rejected.push_back(group.label+"/"+std::to_string(item.first));
                     continue;
@@ -196,7 +280,7 @@ int main(int argc, char** argv) {
                 if (a.dot(b)<0) { std::reverse(p.right.begin(),p.right.end()); p.rightReversed=true; }
                 for (auto& point:p.left) point+=group.leftOffset;
                 pairs.push_back(std::move(p));
-                std::cout << "Detected " << group.label << '/' << item.first << " (88+88 corners)\n";
+                std::cout << "Detected " << group.label << '/' << item.first << " (88+88 corners)" << std::endl;
             }
         }
         Require(pairs.size()>=3, "Need at least 3 valid image pairs with distinct board poses");
@@ -253,7 +337,7 @@ int main(int argc, char** argv) {
             Rectification rect;rect.leftK=left.K.clone();
             rect.leftK.at<double>(0,2)-=kGroups[p.group].leftOffset.x;
             rect.leftK.at<double>(1,2)-=kGroups[p.group].leftOffset.y;
-            cv::stereoRectify(rect.leftK,left.D,right.K,right.D,kFrameSize,R,T,
+            if (!fullFrame) cv::stereoRectify(rect.leftK,left.D,right.K,right.D,kFrameSize,R,T,
                              rect.R1,rect.R2,rect.P1,rect.P2,rect.Q,cv::CALIB_ZERO_DISPARITY,0.,kFrameSize);
             rectifications.emplace(p.group,std::move(rect));
         }
@@ -265,6 +349,8 @@ int main(int argc, char** argv) {
              << "quality_passed" << static_cast<int>(passes) << "distance_validated" << 0
              << "residual_checks_passed" << static_cast<int>(residualChecksPassed)
              << "left_offsets_confirmed" << static_cast<int>(offsetsConfirmed)
+             << "capture_mode" << (fullFrame?"left_full_frame_right_native":"left_roi_right_native")
+             << "rectification_parameters_available" << static_cast<int>(!fullFrame)
              << "transform_convention" << "X_right_mm = R * X_left_mm + T_mm"
              << "camera_axes" << "x_right,y_down,z_forward"
              << "intrinsics_policy" << "CALIB_FIX_INTRINSIC" << "exif_orientation" << "ignored"
@@ -295,13 +381,17 @@ int main(int argc, char** argv) {
                  << "left_offset_x" << static_cast<int>(g.leftOffset.x) << "left_offset_y" << static_cast<int>(g.leftOffset.y)
                  << "left_offset_confirmed" << static_cast<int>(g.offsetConfirmed)
                  << "right_offset_x" << 0 << "right_offset_y" << 0
+                 << "left_image_width" << g.leftSize.width << "left_image_height" << g.leftSize.height
+                 << "right_image_width" << kFrameSize.width << "right_image_height" << kFrameSize.height
                  << "right_corner_order_reversed" << static_cast<int>(p.rightReversed)
+                 << "image_points_left_reference" << p.left << "image_points_right" << p.right
                  << "left_rms_px" << errors.at<double>(static_cast<int>(i),0)
                  << "right_rms_px" << errors.at<double>(static_cast<int>(i),1)
                  << "epipolar_rms_px" << p.epipolarRms << "}";
         }
         yaml << "]" << "rectification_by_left_roi" << "[";
         for (const auto& item:rectifications) {
+            if (fullFrame) continue; // 原生尺寸不同，保留K/D/R/T/E/F；不输出假定同尺寸的P/Q。
             const auto& g=kGroups[item.first];const auto& rect=item.second;
             yaml << "{" << "group" << g.label << "left_offset_x" << static_cast<int>(g.leftOffset.x)
                  << "left_offset_confirmed" << static_cast<int>(g.offsetConfirmed)
@@ -331,13 +421,17 @@ int main(int argc, char** argv) {
         cv::putText(reference,"Stereo RMS="+Number(rms)+" px; epipolar P95="+Number(epiP95)+" px; pairs="+std::to_string(pairs.size()),
                     {10,57},cv::FONT_HERSHEY_SIMPLEX,.6,{255,255,255},1);
         yaml << "reference_image" << "reference.png"
-             << "reference_layout" << "per selected pair: rectified view followed by raw input with detected corner order"
+             << "reference_layout" << (fullFrame?
+                 "per selected pair: independently scaled undistorted board crops with epilines, then native raw inputs; not stereo-rectified":
+                 "per selected pair: rectified view followed by raw input with detected corner order")
              << "reference_pairs" << "[";
         for (std::size_t row=0;row<referenceIndices.size();++row) {
             const auto i=referenceIndices[row];const auto& p=pairs[i];
             const auto label=kGroups[p.group].label+" / pair "+std::to_string(p.number)+
                 (i==worst?" (WORST)":" (GROUP MEDIAN)")+"  epipolar RMS="+Number(p.epipolarRms)+" raw px";
-            ReferenceRow(p,rectifications.at(p.group),left,right,label).copyTo(
+            const auto rowImage=fullFrame?FullReferenceRow(p,left,right,F,label):
+                                         ReferenceRow(p,rectifications.at(p.group),left,right,label);
+            rowImage.copyTo(
                 reference(cv::Rect(0,75+kReferenceRowHeight*static_cast<int>(row),1440,kReferenceRowHeight)));
             yaml << "{" << "group" << kGroups[p.group].label << "number" << p.number << "}";
         }
