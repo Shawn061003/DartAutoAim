@@ -65,7 +65,7 @@ int readDimension(const cv::FileNode& node, const char* key,
 }
 
 // 读取 OpenCV 矩阵节点，统一转换为 CV_64F，并拒绝空矩阵、多通道及非有限值。
-// 内参与畸变向量的具体尺寸由 readCamera 分别校验。
+// 内参及畸变向量的尺寸和结构由配置文件保证，读取时保持原有形状。
 cv::Mat readMatrix(const cv::FileNode& node, const char* key,
                    const std::string& prefix)
 {
@@ -83,7 +83,7 @@ cv::Mat readMatrix(const cv::FileNode& node, const char* key,
     return result;
 }
 
-// 解析一侧相机的完整节点，返回通过校验的临时参数。
+// 解析一侧相机的完整节点，返回临时参数；标定矩阵的尺寸和结构由配置保证。
 CameraParams readCamera(const cv::FileNode& node, const std::string& name)
 {
     if (!node.isMap()) invalid(name, "missing camera section or expected a mapping");
@@ -101,21 +101,6 @@ CameraParams readCamera(const cv::FileNode& node, const std::string& name)
     camera.cameraMatrix = readMatrix(node, "camera_matrix", name);
     camera.distCoeffs = readMatrix(node, "distortion_coefficients", name);
 
-    // K 的结构为 [fx, s, cx; 0, fy, cy; 0, 0, 1]，fx、fy 必须为正。
-    // 先检查尺寸，确保后续 at<double> 下标访问有效。
-    const auto& k = camera.cameraMatrix;
-    if (k.rows != 3 || k.cols != 3)
-        invalid(name + ".camera_matrix", "expected a 3x3 matrix");
-    if (k.at<double>(0, 0) <= 0.0 || k.at<double>(1, 1) <= 0.0 ||
-        k.at<double>(1, 0) != 0.0 || k.at<double>(2, 0) != 0.0 ||
-        k.at<double>(2, 1) != 0.0 || k.at<double>(2, 2) != 1.0)
-        invalid(name + ".camera_matrix", "invalid pinhole intrinsics");
-
-    // 当前标定采用五参数模型；接受 1x5 或 5x1，统一保存为独立的 5x1 矩阵。
-    if (camera.distCoeffs.total() != 5 ||
-        (camera.distCoeffs.rows != 1 && camera.distCoeffs.cols != 1))
-        invalid(name + ".distortion_coefficients", "expected 5 coefficients: k1,k2,p1,p2,k3");
-    camera.distCoeffs = camera.distCoeffs.reshape(1, 5).clone();
     return camera;
 }
 
@@ -208,6 +193,14 @@ GuideLightParams readGuideLight(const cv::FileNode& node)
     return result;
 }
 
+StereoscopicMeasurementParams readStereoscopicMeasurement(const cv::FileNode& node)
+{
+    StereoscopicMeasurementParams result;
+    result.R = readMatrix(node, "R", "stereo_calibration");
+    result.T = readMatrix(node, "T_mm", "stereo_calibration");
+    return result;
+}
+
 } // namespace
 
 DartCongfig::DartCongfig(const std::string& configPath)
@@ -229,6 +222,7 @@ void DartCongfig::load(const std::string& configPath)
         auto right = readCamera(cameras["right"], "cameras.right");
         auto nextYOLO = readYOLO(section(root, "yolo"), base);
         auto nextGuideLight = readGuideLight(section(root, "guide_light"));
+        auto nextStereoscopicMeasurement = readStereoscopicMeasurement(section(root,"stereo_calibration"));
 
         // 全部板块校验通过后提交，任何解析错误都保留之前的配置。
         input = std::move(nextInput);
@@ -237,6 +231,7 @@ void DartCongfig::load(const std::string& configPath)
         rightCamera = std::move(right);
         yolo = std::move(nextYOLO);
         guideLight = nextGuideLight;
+        stereoscopicmeasurement = std::move(nextStereoscopicMeasurement);
     } catch (const std::exception& error) {
         throw std::runtime_error("DartCongfig [" + configPath + "]: " + error.what());
     }

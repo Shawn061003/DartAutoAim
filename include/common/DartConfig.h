@@ -69,6 +69,11 @@ struct GuideLightParams {
     }
 };
 
+struct StereoscopicMeasurementParams{
+    cv::Mat R;      // 左相机光心到右相机的光心的旋转矩阵
+    cv::Mat T;      // 左相机光心到右相机光心的平移矩阵
+};
+
 // 左右相机共用字段定义，各自保存一份参数；数值字段的初始值为待配置值。
 struct CameraParams {
     std::string deviceIp;       // 相机设备 IP，启用相机前填写
@@ -95,6 +100,8 @@ public:
     FrameQueueParams frameQueue;
     YOLOParams yolo;
     GuideLightParams guideLight;
+    StereoscopicMeasurementParams stereoscopicmeasurement;
+    
     // 类型别名便于调用方表达相机侧别，字段定义统一维护。
     using LeftCameraParams = CameraParams;
     using RightCameraParams = CameraParams;
