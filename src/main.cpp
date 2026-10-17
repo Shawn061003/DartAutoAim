@@ -5,6 +5,7 @@
 #include "Acquisition/Quit.h"
 #include "Perception/YOLOinfer.h"
 #include "Perception/GuideLightDetect.h"
+#include "Computation/StereoscopicMeasurement.h"
 #include "Visualization/Visualize.h"
 
 #include <chrono>
@@ -62,6 +63,29 @@ GuideLightDetectVisualize::FrameVisualize makeGuideLightVisualize(
     return data;
 }
 
+StereoscopicMeasurementVisualize::FrameVisualize makeMeasurementVisualize(
+    const StereoFrame& frame, const cv::Mat& leftToRightTmm,
+    const std::vector<StereoscopicMeasurement::StereoscopicMeasurementResult>& results)
+{
+    StereoscopicMeasurementVisualize::FrameVisualize data;
+    // 测距输出以右光心为原点；左光心在此坐标系的位置是T，不是-R^T*T。
+    data.left_camera_m = {leftToRightTmm.at<double>(0, 0) / 1000.0,
+                          leftToRightTmm.at<double>(1, 0) / 1000.0,
+                          leftToRightTmm.at<double>(2, 0) / 1000.0};
+    data.left_frame_id = frame.left.frame_id;
+    data.right_frame_id = frame.right.frame_id;
+    data.targets.reserve(results.size());
+    using ClassVisualize = StereoscopicMeasurementVisualize::TargetClassVisualize;
+    for (const auto& result : results) {
+        auto category = ClassVisualize::UNKNOWN;
+        if (result.TargetName == TargetClasses::BASE) category = ClassVisualize::BASE;
+        else if (result.TargetName == TargetClasses::OUTPOST) category = ClassVisualize::OUTPOST;
+        data.targets.push_back({result.RealLocation * 0.001, category,
+            result.leftReprojectionErrorPx, result.rightReprojectionErrorPx});
+    }
+    return data;
+}
+
 // 一对匹配帧共享同一条检测链；图像、YOLO ROI 和传统视觉结果保持原图坐标。
 // 返回值保留两侧各自的帧号、时间戳和检测状态，供后续模块继续使用。
 GuideLightDetect::StereoDetectResult processFrame(
@@ -69,10 +93,14 @@ GuideLightDetect::StereoDetectResult processFrame(
 {
     // 第一步：YOLO 为左右原图生成候选 ROI。
     const auto rois = yolo.RunYOLOInfer(frame.left, frame.right);
-    YOLOInferenceVisualize::Show(makeYOLOVisualize(frame.left, rois.left),
-                                 makeYOLOVisualize(frame.right, rois.right));
     // 第二步：在各 ROI 内提取绿色轮廓并拟合中心，完成本阶段视觉检测。
-    return guideLight.RunDetection(frame.left, frame.right, rois);
+    const auto detections = guideLight.RunDetection(frame.left, frame.right, rois);
+    // 一个 detection 窗口，上层 YOLO、下层传统视觉，每对帧只刷新一次。
+    DetectionVisualize::Show(makeYOLOVisualize(frame.left, rois.left),
+                             makeYOLOVisualize(frame.right, rois.right),
+                             makeGuideLightVisualize(frame.left, detections.left),
+                             makeGuideLightVisualize(frame.right, detections.right));
+    return detections;
 }
 
 int runImageMode(const DartCongfig& config)
@@ -90,15 +118,16 @@ int runImageMode(const DartCongfig& config)
               << "...\n" << std::flush;
     YOLOInference yolo(config.yolo);
     GuideLightDetect guideLight(config.guideLight);
+    StereoscopicMeasurement measurement(config.leftCamera, config.rightCamera,
+        config.stereoscopicmeasurement.R, config.stereoscopicmeasurement.T);
 
     const auto detections = processFrame(*frame, yolo, guideLight);
     std::cout << "Visual detection completed: left_frame=" << frame->left.frame_id
               << " right_frame=" << frame->right.frame_id << '\n';
-    GuideLightDetectVisualize::Show(
-        makeGuideLightVisualize(frame->left, detections.left),
-        makeGuideLightVisualize(frame->right, detections.right), 0);
-    // 空集合和 FAILED 项均为有效的检测结果；本阶段到像素中心检测结束。
-    // TODO: 后续接入双目目标关联；左右集合中相同下标的目标需要单独匹配。
+    const auto measurements = measurement.RunMeasurement(detections);
+    // 两个窗口均创建后再等待按键；GTK3 关闭全部窗口也可结束图片模式。
+    StereoscopicMeasurementVisualize::Show(
+        makeMeasurementVisualize(*frame, config.stereoscopicmeasurement.T, measurements), 0);
     return 0;
 }
 
@@ -113,6 +142,7 @@ int runCameraMode(const DartCongfig& config)
     std::cout << "Loading camera perception on " << config.yolo.device << "...\n" << std::flush;
     YOLOInference yolo(config.yolo);
     GuideLightDetect guideLight(config.guideLight);
+    StereoscopicMeasurement stereoscopicmeasurement(config.leftCamera, config.rightCamera, config.stereoscopicmeasurement.R, config.stereoscopicmeasurement.T);
     if (stopSignals.stopRequested()) return 0;
     input.StartCamera();
     std::cout << "Camera perception started. Press Ctrl+C to stop.\n" << std::flush;
@@ -127,15 +157,13 @@ int runCameraMode(const DartCongfig& config)
 
         // 4. 完成左右帧的 YOLO ROI 提取和引导灯检测，保持原图坐标及帧来源。
         const auto detections = processFrame(*frame, yolo, guideLight);
-        // 连续刷新左右传统视觉结果；短暂处理窗口事件，避免等待按键阻塞相机循环。
-        GuideLightDetectVisualize::Show(
-            makeGuideLightVisualize(frame->left, detections.left),
-            makeGuideLightVisualize(frame->right, detections.right), 1);
-        // detections 是本阶段输出；空集合和 FAILED 项均保留真实检测含义。
-        // TODO: 后续在此接入双目目标关联及解算，相同下标不表示同一物理目标。
+        // 5. 双目测距与可视化；空结果刷新为空面板，不沿用之前的目标。
+        const auto measurements = stereoscopicmeasurement.RunMeasurement(detections);
+        StereoscopicMeasurementVisualize::Show(
+            makeMeasurementVisualize(*frame, config.stereoscopicmeasurement.T, measurements), 1);
     }
 
-    // 5. 正常退出显式停止；初始化或检测抛异常时由 CameraInput 析构完成同样清理。
+    // 6. 正常退出显式停止；初始化或检测抛异常时由 CameraInput 析构完成同样清理。
     input.StopCamera();
     std::cout << "Camera perception stopped.\n";
     return 0;

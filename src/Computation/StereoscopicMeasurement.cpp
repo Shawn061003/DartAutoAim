@@ -124,6 +124,8 @@ std::vector<StereoscopicMeasurement::Candidate> StereoscopicMeasurement::GetCand
             candidate.measurement.rightPixel = result.right[candidate.rightIndex].CenterPoint;
             candidate.measurement.RealLocation = cv::Point3d(positionRight);
             candidate.measurement.TargetName = TargetClasses::UNKNOWN;
+            candidate.measurement.leftReprojectionErrorPx = leftError;
+            candidate.measurement.rightReprojectionErrorPx = rightError;
             candidate.epipolarErrorPx = epipolarError;
             candidate.reprojectionErrorPx = reprojectionError;
             candidates.push_back(candidate);
@@ -136,8 +138,8 @@ std::vector<StereoscopicMeasurement::StereoscopicMeasurementResult>
 StereoscopicMeasurement::SelectFromCandidate(const std::vector<Candidate>& candidates) const
 {
     // 1. 使用右相机XZ平面投影距离sqrt(X*X+Z*Z)，单位毫米；区间包含两端。
-    constexpr double baseMinDistance = 23500.0;
-    constexpr double baseMaxDistance = 25500.0;
+    constexpr double baseMinDistance = 20500.0;
+    constexpr double baseMaxDistance = 28500.0;
     constexpr double baseReferenceDistance = 24400.0;
     constexpr double outpostMinDistance = 14000.0;
     constexpr double outpostMaxDistance = 16000.0;
@@ -179,10 +181,12 @@ StereoscopicMeasurement::SelectFromCandidate(const std::vector<Candidate>& candi
     if (base) {
         selected.push_back(base->measurement);
         selected.back().TargetName = TargetClasses::BASE;
+        selected.back().reprojectionErrorPx = base->reprojectionErrorPx;
     }
     if (outpost) {
         selected.push_back(outpost->measurement);
         selected.back().TargetName = TargetClasses::OUTPOST;
+        selected.back().reprojectionErrorPx = outpost->reprojectionErrorPx;
     }
     return selected;
 }

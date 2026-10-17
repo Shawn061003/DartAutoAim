@@ -112,19 +112,23 @@ if(DART_BUILD_MAIN OR (DART_BUILD_HSV_TUNER AND DART_BUILD_YOLO))
 
 endif()
 
-# 主程序：从YAML选择模式，依次完成采集、YOLO与引导灯检测。
+# 主程序：从YAML选择模式，完成采集、检测及相机模式的双目测距。
 if(DART_BUILD_MAIN)
+    # 测距需要calib3d，独立于标定工具的编译开关。
+    find_package(OpenCV REQUIRED COMPONENTS core calib3d)
     add_executable(dart_vision src/main.cpp)
+    target_sources(dart_vision PRIVATE src/Computation/StereoscopicMeasurement.cpp)
     # 默认配置定位到源码目录；模型和媒体路径由 YAML 所在目录解析。
     target_compile_definitions(dart_vision PRIVATE DART_PROJECT_ROOT="${CMAKE_CURRENT_SOURCE_DIR}")
     target_compile_options(dart_vision PRIVATE -Wall -Wextra -Wpedantic)
     target_link_libraries(dart_vision PRIVATE dart::config dart::mcu_protocol dart::acquisition dart::visualization)
-    target_link_libraries(dart_vision PRIVATE dart::camera)
+    target_link_libraries(dart_vision PRIVATE dart::camera opencv_calib3d)
 
     if(BUILD_TESTING)
         # 相机主循环测试使用设备/感知替身；验证配对、退出和显示数据传递，不访问相机或窗口。
         add_executable(dart_camera_mode_test tests/test_camera_mode.cpp)
-        target_link_libraries(dart_camera_mode_test PRIVATE dart::config dart::acquisition)
+        target_sources(dart_camera_mode_test PRIVATE src/Computation/StereoscopicMeasurement.cpp)
+        target_link_libraries(dart_camera_mode_test PRIVATE dart::config dart::acquisition opencv_calib3d)
         target_compile_definitions(dart_camera_mode_test PRIVATE
             DART_PROJECT_ROOT="${CMAKE_CURRENT_SOURCE_DIR}")
         target_compile_options(dart_camera_mode_test PRIVATE -Wall -Wextra -Wpedantic)

@@ -27,6 +27,11 @@ public:
             std::numeric_limits<double>::quiet_NaN(),
             std::numeric_limits<double>::quiet_NaN()}; // 右相机光心坐标，毫米
         TargetClasses TargetName = TargetClasses::UNKNOWN;
+        // 去畸变像素坐标中的重投影误差，与几何筛选使用的误差定义一致。
+        double leftReprojectionErrorPx = std::numeric_limits<double>::quiet_NaN();
+        double rightReprojectionErrorPx = std::numeric_limits<double>::quiet_NaN();
+        // 两侧重投影误差的最大值，单位像素；由SelectFromCandidate从选中候选填入。
+        double reprojectionErrorPx = std::numeric_limits<double>::quiet_NaN();
     };
 
     /// @brief 初始化测距器，保存标定矩阵的独立副本，不读取配置文件。
