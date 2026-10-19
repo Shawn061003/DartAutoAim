@@ -18,6 +18,7 @@
 #include <exception>
 #include <filesystem>
 #include <future>
+#include <functional>
 #include <iomanip>
 #include <iostream>
 #include <mutex>
@@ -151,6 +152,59 @@ public:
     }
 };
 
+// A job owns its frame and calibration snapshot. No processor state is shared with the UI/solver.
+struct DetectionJob {
+    CameraFrame frame;
+    calib::captureParameters capture;
+    cv::Mat cameraMatrix, distCoeffs;
+    Clock::time_point receivedAt;
+    std::uint64_t epoch = 0;
+};
+
+struct DetectionResult {
+    CameraFrame frame;
+    cv::Mat annotated;
+    std::vector<cv::Point2f> points;
+    Clock::time_point receivedAt;
+    std::uint64_t epoch = 0;
+    bool found = false, angleOK = false;
+    double milliseconds = 0;
+};
+
+DetectionResult detectBoard(DetectionJob job) {
+    const auto started = Clock::now();
+    auto data = cv::makePtr<calib::calibrationData>();
+    data->imageSize = job.frame.image.size();
+    data->cameraMatrix = std::move(job.cameraMatrix); data->distCoeffs = std::move(job.distCoeffs);
+    BoardProcessor processor(data,job.capture);
+    DetectionResult result;
+    result.frame = std::move(job.frame); result.receivedAt = job.receivedAt; result.epoch = job.epoch;
+    result.annotated = result.frame.image.clone();
+    result.found = processor.observe(result.annotated);
+    if (result.found) { result.points = processor.points(); result.angleOK = processor.acceptableAngle(); }
+    result.milliseconds = std::chrono::duration<double,std::milli>(Clock::now()-started).count();
+    return result;
+}
+
+// One in-flight job, no detection queue. The UI submits the newest frame when this becomes free.
+class BackgroundDetector {
+    std::future<DetectionResult> pending_;
+    std::function<DetectionResult(DetectionJob)> detect_;
+public:
+    explicit BackgroundDetector(std::function<DetectionResult(DetectionJob)> detect = detectBoard)
+        : detect_(std::move(detect)) {}
+    bool busy() const { return pending_.valid(); }
+    bool submit(DetectionJob job) {
+        if (busy()) return false;
+        pending_ = std::async(std::launch::async,detect_,std::move(job));
+        return true;
+    }
+    std::optional<DetectionResult> takeReady() {
+        if (!busy() || pending_.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return {};
+        return pending_.get(); // Propagate worker errors on the UI thread; destruction joins outstanding work.
+    }
+};
+
 struct Sample {
     std::vector<cv::Point2f> points;
     std::string image;
@@ -280,7 +334,8 @@ void text(cv::Mat& canvas, const std::string& value, int x, int y, cv::Scalar co
 
 cv::Mat dashboard(const cv::Mat& annotated, const Options& o, const std::vector<Sample>& samples,
                   const Solution& solved, bool busy, bool automatic, bool undistorted,
-                  const std::string& status) {
+                  const std::string& status, const DetectionResult* detection = nullptr,
+                  bool detecting = false, std::uint64_t liveFrameId = 0) {
     cv::Mat canvas(900,1280,CV_8UC3,cv::Scalar(25,25,25));
     if (!annotated.empty()) {
         const double scale = std::min(960.0 / annotated.cols, 640.0 / annotated.rows);
@@ -293,6 +348,20 @@ cv::Mat dashboard(const cv::Mat& annotated, const Options& o, const std::vector<
         }
         preview.copyTo(canvas(cv::Rect(0,0,preview.cols,preview.rows)));
     }
+    if (!annotated.empty()) text(canvas,"LIVE #" + std::to_string(liveFrameId),10,22,{80,255,80});
+    // Historical corners belong only on their own image, never on the latest live frame.
+    if (detection && !detection->annotated.empty()) {
+        cv::rectangle(canvas,{645,405,315,230},{20,20,20},cv::FILLED);
+        text(canvas,std::string(detection->found ? "Board #" : "No board #") +
+             std::to_string(detection->frame.frame_id) + " (RAW)",650,423);
+        const double scale = std::min(300.0/detection->annotated.cols,200.0/detection->annotated.rows);
+        cv::Mat inset; cv::resize(detection->annotated,inset,{},scale,scale,cv::INTER_AREA);
+        inset.copyTo(canvas(cv::Rect(650,430,inset.cols,inset.rows)));
+    }
+    std::string detectionStatus = detecting ? "Detector: WORKING" : "Detector: READY";
+    if (detection) detectionStatus += cv::format(" | last %.0f ms | frame age %.1f s",detection->milliseconds,
+        std::chrono::duration<double>(Clock::now()-detection->receivedAt).count());
+    text(canvas,detectionStatus,10,645);
     const int x = 975; int y = 25;
     auto line = [&](const std::string& s) { text(canvas,s,x,y); y += 28; };
     line("Camera: " + o.side); line("Model: " + o.model);
@@ -351,18 +420,21 @@ int run(const Options& o) {
     auto data = cv::makePtr<calib::calibrationData>(); data->imageSize = {params.width,params.height};
     calib::captureParameters capture; capture.board = calib::Chessboard; capture.boardSize = o.board;
     capture.squareSize = o.squareMm; capture.templDst = 295; capture.captureDelay = 1; capture.fps = 1;
-    BoardProcessor processor(data,capture);
+    BackgroundDetector detector;
+    std::optional<DetectionResult> detection;
+    std::optional<CameraFrame> latest;
     std::vector<Sample> samples;
     Solution solved; solved.data = data; solved.flags = modelFlags(o.model);
     std::future<Solution> pending;
-    std::uint64_t revision = 0, pendingRevision = 0, serial = 0;
+    std::uint64_t revision = 0, pendingRevision = 0, serial = 0, detectionEpoch = 0;
+    std::uint64_t previewSequence = 0, submittedSequence = 0;
     std::uint64_t solvedRevision = std::numeric_limits<std::uint64_t>::max();
     bool automatic = o.automatic, undistorted = false, captureRequested = false;
     bool saved = false;
     std::string status = "Waiting for a complete chessboard";
     cv::Mat annotated;
     std::vector<cv::Point2f> anchor;
-    auto stableSince = Clock::now(), lastFrameAt = Clock::now();
+    auto stableSince = Clock::now(), lastFrameAt = Clock::now(), captureAfter = Clock::now();
     auto launch = [&](cv::Mat raw = {}, std::string image = {}) {
         const auto snapshot = samples; const auto size = data->imageSize;
         const int flags = o.model == "auto" ? solved.flags : modelFlags(o.model);
@@ -393,49 +465,64 @@ int run(const Options& o) {
                     }
                 } catch (const FrameWriteError&) { throw; }
                 catch (const std::exception& e) { status = std::string("Solve failed: ")+e.what(); std::cerr << status << '\n'; }
-                anchor.clear();
+                anchor.clear(); ++detectionEpoch;
             }
             const bool busy = pending.valid();
-            auto frame = camera.take();
-            if (frame) {
-                lastFrameAt = Clock::now(); annotated = frame->image.clone();
-                const bool found = processor.observe(annotated);
-                const auto now = Clock::now();
-                if (!found || busy) { anchor.clear(); captureRequested = false; }
-                else {
-                    const auto& points = processor.points();
-                    const double threshold = 0.0006 * std::hypot(params.width,params.height);
-                    if (anchor.empty() || cornerMotion(points,anchor)>threshold) { anchor = points; stableSince = now; }
-                    const double held = std::chrono::duration<double>(now-stableSince).count();
-                    const bool novel = diverse(points,samples,data->imageSize);
-                    status = novel ? cv::format("Hold steady: %.1f / %.1f s",held,o.holdSeconds) : "Already sampled this pose; move/tilt/resize the board";
-                    if ((captureRequested || (automatic && held >= o.holdSeconds)) && novel) {
-                        if (processor.acceptableAngle()) {
-                            const std::string image = cv::format("frames/frame_%06llu.png",static_cast<unsigned long long>(++serial));
-                            samples.push_back({points,image,frame->frame_id}); ++revision; saved = false;
-                            launch(frame->image,image); status = "Saving original frame and updating calibration";
-                        } else status = "Rejected by official board-angle check; reduce tilt";
-                        anchor.clear();
-                    }
-                    captureRequested = false;
-                }
-                if (!found) status = "Complete chessboard not found";
+            if (auto frame = camera.take()) {
+                lastFrameAt = Clock::now(); latest = std::move(frame); ++previewSequence;
+                annotated = latest->image; // Read-only native frame; the worker draws on its own clone.
             } else if (Clock::now()-lastFrameAt>std::chrono::seconds(5)) {
                 throw std::runtime_error("No camera frame for 5 seconds; check SDK connection/exposure");
             }
-            cv::imshow(windowName,dashboard(annotated,o,samples,solved,pending.valid(),automatic,undistorted,status));
+            if (auto result = detector.takeReady()) {
+                if (result->epoch == detectionEpoch) {
+                    const bool manual = captureRequested && result->receivedAt >= captureAfter;
+                    if (!result->found || busy) anchor.clear();
+                    else {
+                        const auto& points = result->points;
+                        const double threshold = 0.0006 * std::hypot(params.width,params.height);
+                        if (anchor.empty() || cornerMotion(points,anchor)>threshold) {
+                            anchor = points; stableSince = result->receivedAt;
+                        }
+                        const double held = std::chrono::duration<double>(result->receivedAt-stableSince).count();
+                        const bool novel = diverse(points,samples,data->imageSize);
+                        status = novel ? cv::format("Hold steady: %.1f / %.1f s",held,o.holdSeconds)
+                                       : "Already sampled this pose; move/tilt/resize the board";
+                        if ((manual || (automatic && held >= o.holdSeconds)) && novel) {
+                            if (result->angleOK) {
+                                const std::string image = cv::format("frames/frame_%06llu.png",static_cast<unsigned long long>(++serial));
+                                samples.push_back({points,image,result->frame.frame_id});
+                                ++revision; ++detectionEpoch; saved = false;
+                                launch(result->frame.image,image); status = "Saving original frame and updating calibration";
+                            } else status = "Rejected by official board-angle check; reduce tilt";
+                            anchor.clear();
+                        }
+                    }
+                    if (manual || busy) captureRequested = false;
+                    if (!result->found && !busy) status = "Complete chessboard not found";
+                }
+                detection = std::move(result);
+            }
+            if (latest && !detector.busy() && submittedSequence != previewSequence) {
+                DetectionJob job; job.frame = *latest; job.capture = capture;
+                job.cameraMatrix = data->cameraMatrix.clone(); job.distCoeffs = data->distCoeffs.clone();
+                job.receivedAt = lastFrameAt; job.epoch = detectionEpoch;
+                detector.submit(std::move(job)); submittedSequence = previewSequence;
+            }
+            cv::imshow(windowName,dashboard(annotated,o,samples,solved,pending.valid(),automatic,undistorted,status,
+                detection ? &*detection : nullptr,detector.busy(),latest ? latest->frame_id : 0));
             const int key = cv::waitKey(1) & 0xff;
             if (key==27 || key=='q' || cv::getWindowProperty(windowName,cv::WND_PROP_VISIBLE)==0) break;
-            if (key=='a') { automatic = !automatic; anchor.clear(); }
+            if (key=='a') { automatic = !automatic; anchor.clear(); captureRequested = false; ++detectionEpoch; }
             if (key=='u') undistorted = !undistorted;
-            if (key==' ') captureRequested = !pending.valid();
+            if (key==' ') { captureRequested = !pending.valid(); captureAfter = Clock::now(); }
             if (key=='s') {
                 if (pending.valid() || solvedRevision!=revision || data->cameraMatrix.empty()) status = "Wait for a valid updated solution before saving";
                 else { saveReport(o,solved); saved = true; status = "Saved intrinsics.yaml and source frames"; }
             }
             if ((key=='r' || key=='d') && !pending.valid()) {
                 if (key=='d') samples.clear(); else if (!samples.empty()) samples.pop_back();
-                ++revision; saved = false; anchor.clear();
+                ++revision; ++detectionEpoch; saved = false; anchor.clear(); captureRequested = false;
                 // Rebuild from retained observations; never show stale confidence after undo/clear.
                 solved = {}; solved.data = cv::makePtr<calib::calibrationData>(); solved.data->imageSize = data->imageSize;
                 solved.flags = modelFlags(o.model); data->cameraMatrix.release(); data->distCoeffs.release();
