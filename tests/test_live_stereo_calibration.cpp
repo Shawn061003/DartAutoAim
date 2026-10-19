@@ -70,6 +70,27 @@ int main() {
         const auto detected=Observe(std::move(rendered));
         Check(detected.leftFound && detected.rightFound && Motion(detected.left,expectedLeft)<.2 &&
               Motion(detected.right,expectedRight)<.2,"Live detection lost native sensor subpixel coordinates");
+        // Distant left boards occupy only 3 pixels/cell after the old 1600-pixel overview.
+        // Preserve native points and use a refinement window smaller than a neighbouring cell.
+        // fx ~= 10414 px and 30 mm squares at 14 m give ~22.3 native pixels/cell.
+        for (const int cell : {8,10,12,22}) {
+            StereoFrame distant;
+            distant.left.image=cv::Mat(left.referenceSize,CV_8UC3,cv::Scalar(210,210,210));
+            distant.right=detected.frame.right;
+            distant.left.frame_id=1000+cell; distant.right.frame_id=2000+cell;
+            const auto expectedFar=drawBoard(distant.left.image,3580,2280,cell);
+            cv::GaussianBlur(distant.left.image,distant.left.image,cell==22?cv::Size(5,5):cv::Size(3,3),cell==22?1.2:.65);
+            const cv::Mat raw=distant.left.image.clone();
+            const auto far=Observe(std::move(distant));
+            Check(far.leftFound && far.rightFound && Motion(far.left,expectedFar)<.2 &&
+                  Motion(far.right,expectedRight)<.2,cv::format("Distant cell=%d: found L=%d R=%d, native RMS L=%.3f R=%.3f",cell,far.leftFound,far.rightFound,Motion(far.left,expectedFar),Motion(far.right,expectedRight)));
+            Check(far.frame.left.frame_id==static_cast<std::uint64_t>(1000+cell) &&
+                  far.frame.right.frame_id==static_cast<std::uint64_t>(2000+cell) &&
+                  cv::norm(far.frame.left.image,raw)==0,"Distant-board search changed the paired frame identity or raw image");
+        }
+        std::vector<cv::Point2f> missing{{1,2}};
+        Check(!Detect(cv::Mat(left.referenceSize,CV_8UC3,cv::Scalar(128,128,128)),missing,true,3200) &&
+              missing.empty(),"Missing distant board left stale corner coordinates");
         auto fitted=Solve(pairs,left,right,10);
         Check(fitted.passed,"Mixed-resolution/focal-length stereo failed basic checks");
         Check(cv::norm(fitted.R-R,cv::NORM_INF)<1e-4 && cv::norm(fitted.T-T)<1,"Known stereo extrinsics not recovered");

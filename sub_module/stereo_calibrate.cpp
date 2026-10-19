@@ -95,25 +95,47 @@ std::map<int, fs::path> IndexFiles(const fs::path& dir, const std::string& side)
     }
     return files;
 }
-bool Detect(const cv::Mat& image, std::vector<cv::Point2f>& points, bool realtime = false) {
+bool Detect(const cv::Mat& image, std::vector<cv::Point2f>& points, bool realtime = false, int realtimeMaxEdge = 1600) {
     cv::Mat gray; cv::cvtColor(image, gray, cv::COLOR_BGR2GRAY);
     if (realtime) {
-        // Missing boards must not trigger exhaustive searches over a 20 MP frame.
-        const double scale=std::min(1.,1600./std::max(gray.cols,gray.rows));
-        cv::Mat coarse;
-        if (scale<1.) cv::resize(gray,coarse,{},scale,scale,cv::INTER_AREA);
-        else coarse=gray;
-        points.clear();
-        const bool found=cv::findChessboardCorners(coarse,{kColumns,kRows},points,
-            cv::CALIB_CB_ADAPTIVE_THRESH | cv::CALIB_CB_NORMALIZE_IMAGE | cv::CALIB_CB_FAST_CHECK);
-        if (!found) { points.clear(); return false; }
-        for (auto& p:points) {
-            p.x*=static_cast<float>(gray.cols)/coarse.cols;
-            p.y*=static_cast<float>(gray.rows)/coarse.rows;
+        // Try the cheap overview first. A second, finer search preserves distant-board cells on the left.
+        // Keep both searches bounded: no exhaustive full-sensor fallback when the board is missing.
+        for (const int edge : {1600,realtimeMaxEdge}) {
+            const double scale=std::min(1.,static_cast<double>(edge)/std::max(gray.cols,gray.rows));
+            cv::Mat coarse;
+            if (scale<1.) cv::resize(gray,coarse,{},scale,scale,cv::INTER_AREA);
+            else coarse=gray;
+            points.clear();
+            bool found=cv::findChessboardCorners(coarse,{kColumns,kRows},points,
+                cv::CALIB_CB_ADAPTIVE_THRESH | cv::CALIB_CB_NORMALIZE_IMAGE | cv::CALIB_CB_FAST_CHECK);
+            if (!found && realtimeMaxEdge>1600 && (edge>=realtimeMaxEdge || scale==1.)) {
+                // The sector-based detector recovers small boards missed by threshold/contour search.
+                points.clear();
+                found=cv::findChessboardCornersSB(coarse,{kColumns,kRows},points,cv::CALIB_CB_NORMALIZE_IMAGE);
+            }
+            if (found && points.size()==kColumns*kRows) {
+                for (auto& p:points) {
+                    p.x*=static_cast<float>(gray.cols)/coarse.cols;
+                    p.y*=static_cast<float>(gray.rows)/coarse.rows;
+                }
+                int window=11;
+                if (realtimeMaxEdge>1600) {
+                    // An 11-pixel half-window crosses neighbouring corners on a small, distant board.
+                    double spacing=std::numeric_limits<double>::infinity();
+                    for (int row=0;row<kRows;++row) for (int col=0;col<kColumns;++col) {
+                        const int i=row*kColumns+col;
+                        if (col+1<kColumns) spacing=std::min(spacing,cv::norm(points[i+1]-points[i]));
+                        if (row+1<kRows) spacing=std::min(spacing,cv::norm(points[i+kColumns]-points[i]));
+                    }
+                    window=std::clamp(static_cast<int>(std::floor(spacing*.4)),1,11);
+                }
+                cv::cornerSubPix(gray,points,{window,window},{-1,-1},
+                    {cv::TermCriteria::COUNT | cv::TermCriteria::EPS,50,.001});
+                return true;
+            }
+            if (edge>=realtimeMaxEdge || scale==1.) break;
         }
-        cv::cornerSubPix(gray,points,{11,11},{-1,-1},
-            {cv::TermCriteria::COUNT | cv::TermCriteria::EPS,50,.001});
-        return points.size()==kColumns*kRows;
+        points.clear(); return false;
     }
     cv::Rect search(0,0,gray.cols,gray.rows);
     // 全幅图先低分辨率定位棋盘，再回到原分辨率局部重检，最终角点未经缩放。
@@ -605,7 +627,7 @@ struct Observation {
 };
 Observation Observe(StereoFrame frame) {
     Observation result; result.frame=std::move(frame);
-    result.leftFound=Detect(result.frame.left.image,result.left,true);
+    result.leftFound=Detect(result.frame.left.image,result.left,true,3200);
     result.rightFound=Detect(result.frame.right.image,result.right,true);
     if(result.leftFound && result.rightFound) result.rightReversed=AlignRight(result.left,result.right);
     return result;
