@@ -91,12 +91,62 @@ int main() {
         std::vector<cv::Point2f> missing{{1,2}};
         Check(!Detect(cv::Mat(left.referenceSize,CV_8UC3,cv::Scalar(128,128,128)),missing,true,3200) &&
               missing.empty(),"Missing distant board left stale corner coordinates");
+        std::vector<cv::Point3f> constraintBoard;
+        for (int y=0;y<kRows;++y) for (int x=0;x<kColumns;++x) constraintBoard.emplace_back(x*kSquareMm,y*kSquareMm,0);
+        std::vector<std::vector<cv::Point2f>> jacobianLeft,jacobianRight;
+        for (const auto& pair:pairs) { jacobianLeft.push_back(pair.pair.left); jacobianRight.push_back(pair.pair.right); }
+        BoundedStereoProblem problem(constraintBoard,jacobianLeft,jacobianRight,{left.K,left.D,right.K,right.D},T.at<double>(0));
+        cv::Mat parameters=problem.initialize(R,T),residual,jacobian;
+        Check(problem.compute(parameters,residual,jacobian),"Cannot evaluate bounded stereo derivatives");
+        // Central differences independently verify all global R/T and per-board pose Jacobian columns.
+        for (int col=0;col<parameters.rows;++col) {
+            const double h=1e-6*std::max(1.,std::abs(parameters.at<double>(col)));
+            cv::Mat plus=parameters.clone(),minus=parameters.clone(),ep,em;
+            plus.at<double>(col)+=h; minus.at<double>(col)-=h;
+            Check(problem.compute(plus,ep,cv::noArray()) && problem.compute(minus,em,cv::noArray()),"Cannot evaluate finite difference");
+            const cv::Mat numeric=(ep-em)/(2*h);
+            Check(cv::norm(numeric-jacobian.col(col),cv::NORM_INF)<1e-5*std::max(1.,cv::norm(numeric,cv::NORM_INF)),
+                  "Bounded stereo Jacobian incorrect at column "+std::to_string(col));
+        }
+        for (const double sign : {-1.,1.}) {
+            TranslationBounds bounds(sign*510.);
+            for (const double extreme : {-1000.,1000.}) {
+                cv::Mat p=cv::Mat::zeros(6,1,CV_64F); p.rowRange(3,6).setTo(extreme);
+                const cv::Mat t=bounds.decode(p);
+                Check(bounds.contains(t) && t.at<double>(0)*sign>0 && std::abs(t.at<double>(1))<=10 && std::abs(t.at<double>(2))<=80,
+                      "Optical-axis translation bounds failed at an extreme optimizer parameter");
+            }
+        }
         auto fitted=Solve(pairs,left,right,10);
         Check(fitted.passed,"Mixed-resolution/focal-length stereo failed basic checks");
         Check(cv::norm(fitted.R-R,cv::NORM_INF)<1e-4 && cv::norm(fitted.T-T)<1,"Known stereo extrinsics not recovered");
         Check(cv::norm(left.K,originalK1)==0 && cv::norm(right.K,originalK2)==0 &&
               cv::norm(left.D,originalD1)==0 && cv::norm(right.D,originalD2)==0,"Fixed native K/D were mutated");
         Check(fitted.rms<.05 && fitted.epiP95<.08,"Synthetic residuals unexpectedly high");
+        Check(fitted.translationConstraint.converged && !fitted.translationConstraint.atLimit &&
+              fitted.translationConstraint.initialT.at<double>(0)<0 && TranslationBounds(-510).contains(fitted.T),
+              "Interior negative-X solution violated translation policy");
+        const double reportedRms=std::sqrt(cv::norm(fitted.errors,cv::NORM_L2SQR)/(2*fitted.errors.rows));
+        Check(std::abs(reportedRms-fitted.rms)<1e-12,"Bounded per-camera residuals disagree with reported RMS");
+        const cv::Mat positiveT=(cv::Mat_<double>(3,1)<<490,-4,35);
+        const auto positive=Solve(Synthetic(left,right,R,positiveT,root),left,right,10);
+        Check(positive.passed && positive.T.at<double>(0)>0 && cv::norm(positive.T-positiveT)<1 &&
+              TranslationBounds(510).contains(positive.T),cv::format("Positive-X fit failed: Tx=%.3f error=%.3f rms=%.4f epi=%.4f converged=%d iterations=%d",positive.T.at<double>(0),cv::norm(positive.T-positiveT),positive.rms,positive.epiP95,positive.translationConstraint.converged,positive.translationConstraint.iterations));
+        for (const cv::Vec3d& outside : {cv::Vec3d(-650,-4,35),cv::Vec3d(-490,35,35),cv::Vec3d(-490,-4,160),cv::Vec3d(-800,120,300)}) {
+            const cv::Mat actual=(cv::Mat_<double>(3,1)<<outside[0],outside[1],outside[2]);
+            const auto constrained=Solve(Synthetic(left,right,R,actual,root),left,right,10);
+            Check(!TranslationBounds(-510).contains(constrained.translationConstraint.initialT) &&
+                  TranslationBounds(-510).contains(constrained.T),"Out-of-range initial T was not constrained");
+            Check(constrained.rms>constrained.translationConstraint.initialRms+1e-4 &&
+                  cv::norm(constrained.R.t()*constrained.R-cv::Mat::eye(3,3,CV_64F))<1e-9,
+                  "Constrained fit hid residual increase or produced an invalid rotation");
+            if (outside[0]==-800) Check(!constrained.passed,"Incompatible baseline observations were marked as quality passed");
+            const double tx=constrained.T.at<double>(0),ty=constrained.T.at<double>(1),tz=constrained.T.at<double>(2);
+            const cv::Mat skew=(cv::Mat_<double>(3,3)<<0.,-tz,ty,tz,0.,-tx,-ty,tx,0.);
+            Check(cv::norm(constrained.E-skew*constrained.R)<1e-10 &&
+                  cv::norm(constrained.F-right.K.inv().t()*constrained.E*left.K.inv())<1e-12,
+                  "E/F were not rebuilt from the bounded R/T");
+        }
         Check(fitted.errors.rows==12 && fitted.perPair.size()==12,"Per-pair camera errors not aligned");
         for(std::size_t i=0;i<pairs.size();++i) {
             Check(fitted.pairs[i].pair.number==pairs[i].pair.number && fitted.pairs[i].leftId==pairs[i].leftId,"Pair identity lost");
@@ -157,6 +207,11 @@ int main() {
               report["pairs"].size()==12 && static_cast<int>(report["distance_validated"])==0,"Export lost native dimensions, pairs or validation boundary");
         Check(static_cast<std::string>(report["pairs"][0]["left_frame_id"])=="100" &&
               static_cast<std::string>(report["pairs"][0]["right_frame_id"])=="700","Export paired the wrong frame identities");
+        cv::Mat freeT; report["unconstrained_T_mm"]>>freeT;
+        Check(cv::norm(freeT-fitted.translationConstraint.initialT)==0 &&
+              static_cast<int>(report["translation_constraint"]["enabled"])==1 &&
+              static_cast<std::string>(report["translation_constraint"]["coordinate_frame"])=="right_camera_optical_x_right_y_down_z_forward",
+              "Export omitted the optical-frame bounds or the unconstrained diagnostic T");
         // Use the just-saved monocular schema as an optional override, and refuse accidental resize/crop mismatch.
         const auto intrinsics=root/"left_intrinsics.yaml";
         { cv::FileStorage file(intrinsics.string(),cv::FileStorage::WRITE);

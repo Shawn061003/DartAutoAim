@@ -6,6 +6,7 @@
 // 输出目录必须不存在。退出码：0=通过基本质量检查，2=已保存诊断结果但质量不合格，1=程序错误。
 // 采集前提：相机之间的位姿固定，且每对左右图中的棋盘必须保持同一位姿。
 #include <opencv2/opencv.hpp>
+#include "stereo_translation_constraint.hpp"
 #include "Acquisition/AcquireFrame.h"
 #include "Acquisition/CameraInput.h"
 #include "Acquisition/Quit.h"
@@ -350,7 +351,7 @@ int OfflineMain(int argc, char** argv) {
         // imageSize只影响内参初始化；FIX_INTRINSIC下左右图无需拥有相同参考尺寸。
         cv::Mat kl=left.K.clone(), dl=left.D.clone(), kr=right.K.clone(), dr=right.D.clone();
         cv::Mat R,T,E,F,errors;
-        const double rms=cv::stereoCalibrate(objects,lp,rp,kl,dl,kr,dr,left.referenceSize,
+        double rms=cv::stereoCalibrate(objects,lp,rp,kl,dl,kr,dr,left.referenceSize,
             R,T,E,F,errors,cv::CALIB_FIX_INTRINSIC,
             {cv::TermCriteria::COUNT|cv::TermCriteria::EPS,150,1e-9});
         Require(std::isfinite(rms) && cv::checkRange(R) && cv::checkRange(T) && cv::norm(T)>1e-6,
@@ -358,6 +359,8 @@ int OfflineMain(int argc, char** argv) {
         Require(cv::norm(kl,left.K,cv::NORM_INF)==0 && cv::norm(kr,right.K,cv::NORM_INF)==0 &&
                 cv::norm(dl,left.D,cv::NORM_INF)==0 && cv::norm(dr,right.D,cv::NORM_INF)==0,
                 "Fixed intrinsics unexpectedly changed");
+
+        const auto translationConstraint=RefineStereoTranslation(board,lp,rp,{left.K,left.D,right.K,right.D},R,T,E,F,errors,rms);
 
         // 3. 用去畸变后的原像素坐标计算左右点到极线的对称距离。
         std::vector<double> epipolarDistances;
@@ -381,7 +384,7 @@ int OfflineMain(int argc, char** argv) {
         const double epiRms=std::sqrt(std::inner_product(epipolarDistances.begin(),epipolarDistances.end(),
                                       epipolarDistances.begin(),0.)/epipolarDistances.size());
         const double epiP95=Quantile(epipolarDistances,.95);
-        const bool residualChecksPassed=rms<=kMaxRmsPx && epiP95<=kMaxEpipolarP95Px && pairs.size()>=kMinQualityPairs;
+        const bool residualChecksPassed=translationConstraint.converged && rms<=kMaxRmsPx && epiP95<=kMaxEpipolarP95Px && pairs.size()>=kMinQualityPairs;
         const bool offsetsConfirmed=std::all_of(pairs.begin(),pairs.end(),
             [](const Pair& p){ return kGroups[p.group].offsetConfirmed; });
         const bool passes=residualChecksPassed && offsetsConfirmed;
@@ -429,6 +432,7 @@ int OfflineMain(int argc, char** argv) {
              << "quality_minimum_pairs" << static_cast<int>(kMinQualityPairs)
              << "discovered_pairs" << discovered << "used_pairs" << static_cast<int>(pairs.size())
              << "rejected_detection_pairs" << rejected;
+        WriteTranslationConstraint(yaml,translationConstraint);
         yaml << "pairs" << "[";
         for (std::size_t i=0;i<pairs.size();++i) {
             const auto& p=pairs[i];const auto& g=kGroups[p.group];
@@ -493,6 +497,10 @@ int OfflineMain(int argc, char** argv) {
         }
         yaml << "]";yaml.release();
         Require(cv::imwrite((output/"reference.png").string(),reference),"Cannot save reference image");
+        std::cout << "Unconstrained T_mm=" << translationConstraint.initialT.t()
+                  << " RMS=" << translationConstraint.initialRms << " px; bounded T_mm=" << T.t()
+                  << " RMS=" << rms << " px; converged=" << translationConstraint.converged
+                  << " at_limit=" << translationConstraint.atLimit << '\n';
         std::cout << "RMS: " << rms << " px\nEpipolar P95: " << epiP95
                   << " px\nBaseline (diagnostic unless validated): " << cv::norm(T) << " mm\nR:\n" << R
                   << "\nT_mm:\n" << T << "\nResidual checks passed: " << residualChecksPassed
@@ -711,6 +719,7 @@ struct Solution {
     std::vector<Epipolar> perPair;
     double rms=std::numeric_limits<double>::quiet_NaN(),epiRms=0,epiP95=0,epiMax=0;
     bool passed=false;
+    TranslationConstraintReport translationConstraint;
 };
 Solution Solve(std::vector<LivePair> pairs,const Camera& left,const Camera& right,int minimumPairs) {
     Solution result; result.pairs=std::move(pairs); if(result.pairs.size()<3) return result;
@@ -730,6 +739,8 @@ Solution Solve(std::vector<LivePair> pairs,const Camera& left,const Camera& righ
             cv::norm(result.T)>1e-6,"Invalid stereo calibration");
     Require(cv::norm(kl,left.K,cv::NORM_INF)==0 && cv::norm(dl,left.D,cv::NORM_INF)==0 &&
             cv::norm(kr,right.K,cv::NORM_INF)==0 && cv::norm(dr,right.D,cv::NORM_INF)==0,"Fixed intrinsics changed unexpectedly");
+    result.translationConstraint=RefineStereoTranslation(board,lp,rp,{left.K,left.D,right.K,right.D},
+        result.R,result.T,result.E,result.F,result.errors,result.rms);
     Require(result.errors.rows==static_cast<int>(result.pairs.size()) && result.errors.cols==2 && cv::checkRange(result.errors),"Invalid per-camera pair errors");
     std::vector<double> maxErrors; double squared=0;
     for(auto& pair:result.pairs) {
@@ -740,7 +751,7 @@ Solution Solve(std::vector<LivePair> pairs,const Camera& left,const Camera& righ
     }
     result.epiRms=std::sqrt(squared/maxErrors.size()); result.epiP95=Quantile(maxErrors,.95);
     result.epiMax=*std::max_element(maxErrors.begin(),maxErrors.end());
-    result.passed=result.pairs.size()>=static_cast<std::size_t>(minimumPairs) && result.rms<=kMaxRmsPx && result.epiP95<=kMaxEpipolarP95Px;
+    result.passed=result.translationConstraint.converged && result.pairs.size()>=static_cast<std::size_t>(minimumPairs) && result.rms<=kMaxRmsPx && result.epiP95<=kMaxEpipolarP95Px;
     return result;
 }
 std::size_t Worst(const Solution& s) {
@@ -796,6 +807,7 @@ void Save(const Options& o,const Camera& left,const Camera& right,const Solution
         <<"capture_requirement"<<"fixed rig; same stationary board pose during both exposures"
         <<"corner_alignment"<<"near-parallel rig: reverse right 180-degree ordering if row directions oppose"
         <<"reference_image"<<"reference.png"<<"rectification_by_left_roi"<<"["<<"]";
+    WriteTranslationConstraint(yaml,s.translationConstraint);
     yaml<<"pairs"<<"[";
     for(std::size_t i=0;i<s.pairs.size();++i) {
         const auto& p=s.pairs[i];
@@ -877,7 +889,7 @@ cv::Mat Dashboard(const Observation& observed,const Camera& left,const Camera& r
         Label(canvas,"Fit: "+std::to_string(solved.pairs.size())+" pairs; RMS="+Number(solved.rms)+" px; baseline="+Number(cv::norm(solved.T),2)+" mm",15,607);
         Label(canvas,"Fit epipolar P95="+Number(solved.epiP95)+" px; max="+Number(solved.epiMax)+" px (max of L/R point-to-line)",15,636);
         Label(canvas,"Change after last solve: rotation="+Number(rotationChange,4)+" deg; translation="+Number(translationChange,3)+" mm",15,665);
-        Label(canvas,solved.passed?"Basic checks: PASS; physical distance NOT validated":"Basic checks: NEED MORE PAIRS / HIGH RMS / HIGH EPIPOLAR ERROR",15,694,
+        Label(canvas,solved.passed?"Basic checks: PASS; physical distance NOT validated":"Basic checks: NEED MORE PAIRS / HIGH ERROR / SOLVER NOT CONVERGED",15,694,
               solved.passed?cv::Scalar(70,220,70):cv::Scalar(80,170,255));
         Label(canvas,"Worst pair ID="+std::to_string(solved.pairs[Worst(solved)].pair.number)+" (X removes it after solver is ready)",860,665);
     } else Label(canvas,"Need at least 3 accepted pairs to solve R/T",15,608);
@@ -889,7 +901,12 @@ cv::Mat Dashboard(const Observation& observed,const Camera& left,const Camera& r
     Label(canvas,status.substr(0,155),15,730,{80,220,255});
     Label(canvas,"LEFT native corner coverage",15,759); Label(canvas,"RIGHT native corner coverage",435,759);
     Coverage(canvas,pairs,left,true,15,775); Coverage(canvas,pairs,right,false,435,775);
-    Label(canvas,"Fixed K/D for EACH camera; only R/T estimated",830,790);
+    Label(canvas,"Fixed K/D; |Tx|=450..570, |Ty|<=10, |Tz|<=80 mm",830,790);
+    if (!solved.T.empty()) {
+        Label(canvas,"T mm: "+Number(solved.T.at<double>(0),2)+", "+Number(solved.T.at<double>(1),2)+", "+Number(solved.T.at<double>(2),2),830,914);
+        Label(canvas,"Free RMS="+Number(solved.translationConstraint.initialRms)+"; bounded RMS="+Number(solved.rms)+
+            (solved.translationConstraint.atLimit?"; AT LIMIT":""),830,945);
+    }
     Label(canvas,"11x8 inner corners; 30 mm squares",830,821);
     Label(canvas,"Pause the SAME board during both exposures",830,852);
     Label(canvas,"Receive timestamps are NOT exposure sync",830,883,{80,170,255});
@@ -922,6 +939,7 @@ int Run(Options o) {
         <<"\nIntrinsics: "<<(o.leftIntrinsics.empty()?"dart.yaml:cameras.left":o.leftIntrinsics.string())<<" | "
         <<(o.rightIntrinsics.empty()?"dart.yaml:cameras.right":o.rightIntrinsics.string())
         <<"\nBoard: 11x8 INNER corners, 30 mm squares. Fixed K/D; no equal-focal constraint.\n"
+        <<"Translation bounds (right optical frame, mm): |Tx|=450..570 (initial sign), |Ty|<=10, |Tz|<=80.\n"
         <<"Keep rig fixed, pause board for sampling. Receive-time pairing is NOT hardware exposure sync.\nOutput: "<<o.output<<'\n';
     cv::namedWindow(kWindow,cv::WINDOW_NORMAL); cv::resizeWindow(kWindow,1440,1020);
     Observation observed;
@@ -959,6 +977,9 @@ int Run(Options o) {
         if(!solved.R.empty()) {
             std::cout<<"Pairs="<<solved.pairs.size()<<" RMS="<<solved.rms<<" px epi P95="<<solved.epiP95
                      <<" px max="<<solved.epiMax<<" px baseline="<<cv::norm(solved.T)<<" mm quality="<<solved.passed<<'\n';
+            std::cout<<"Unconstrained T_mm="<<solved.translationConstraint.initialT.t()<<" RMS="<<solved.translationConstraint.initialRms
+                     <<" px; bounded T_mm="<<solved.T.t()<<" RMS="<<solved.rms<<" px; converged="<<solved.translationConstraint.converged
+                     <<" at_limit="<<solved.translationConstraint.atLimit<<'\n';
             if(observed.leftFound && observed.rightFound) current=MeasureEpipolar(observed.left,observed.right,left,right,solved.F);
         }
         status=jobIsSave?"Saved stereo.yaml and median/worst reference images":"Updated; move board to another pose";

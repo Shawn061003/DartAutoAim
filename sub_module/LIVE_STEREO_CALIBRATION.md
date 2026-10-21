@@ -77,16 +77,24 @@ P95 对每个角点先取左右点到极线距离的最大值，再求分位数�
 
 ## 求解与输出
 
-分别固定两侧 K/D，通过 `cv::stereoCalibrate(..., CALIB_FIX_INTRINSIC)` 求 R/T/E/F，不加相同焦距约束，也不把输入图片缩放到同一尺寸。
+分别固定两侧 K/D，先通过 `cv::stereoCalibrate(..., CALIB_FIX_INTRINSIC)` 得到无约束初始解，再用 OpenCV LM 联合优化 R、带硬边界的 T 和每对棋盘位姿。不加相同焦距约束，也不把输入图片缩放到同一尺寸。实时与离线入口均使用以下平移约束：
+
+- `450 ≤ |Tx| ≤ 570 mm`（51±6 cm），x 的正负号沿用无约束初始解。
+- `−10 ≤ Ty ≤ 10 mm`（±1 cm）。
+- `−80 ≤ Tz ≤ 80 mm`（±8 cm）。
+
+坐标约定为 `X_right = R * X_left + T`，T 表示左光心在右相机光心坐标系中的位置；x 向右、y 向下、z 沿光轴向前。约束直接作用于 T 的三个分量，不作用于世界坐标或仅限制基线总长度。
+优化过程中用 `T = center + half_width * tanh(q)` 保证所有候选 T 均在范围内，同时优化旋转和棋盘位姿；完成后从最终 R/T 重算 E、F、逐图重投影误差及极线误差。
+控制台与 `stereo.yaml` 同时保留无约束 T/R/RMS、约束范围、迭代数、收敛状态，以及是否距边界不足 0.1 mm。界面显示最终 T 与约束前后 RMS。触及边界可能表明数据或内参与测量尺寸不一致；误差和收敛质量条件仍会正常检查。
 默认新建 `CalibrationResults/stereo_live_<timestamp>/`，或 `--output=/NEW/directory`；拒绝覆盖已有目录。
 
 - `left/leftN.png`、`right/rightN.png`：同一次接受采样的未标注原始图像，保持各自分辨率。
-- `stereo.yaml`：两侧 K/D 与尺寸、R、T_mm、E、F_reference、基线、总体及逐对残差、保留图对原始角点、源帧号、接收时间、角点反序和质量检查状态。
+- `stereo.yaml`：两侧 K/D 与尺寸、约束后的 R/T_mm/E/F_reference、基线、总体及逐对残差、保留图对原始角点、源帧号、接收时间、角点反序和质量检查状态；另含 `translation_constraint`、`unconstrained_R`、`unconstrained_T_mm` 和 `unconstrained_rms_reprojection_error_px`。
 - `reference.png`：当前中位和最差图对的去畸变极线局部图与原图，延续原程序参考图方式。
 
 撤销、清空及删除最差图对不会删除已经拍摄的原图；`stereo.yaml` 的 pairs 清单才是当前解使用的图对集合。
 `X_right_mm = R * X_left_mm + T_mm`；方格单位为 mm，因此 T_mm 和基线也是 mm。
-基本质量条件保持为：至少 min-pairs 对、RMS ≤ 0.5 px、极线 P95 ≤ 1 px。
+基本质量条件为：约束优化已收敛、至少 min-pairs 对、RMS ≤ 0.5 px、极线 P95 ≤ 1 px。
 任何情况下都保留 `distance_validated: 0`，不会自动覆盖 dart.yaml；实际工作距离仍须独立验证。
 退出码：0=当前解通过基本质量检查；2=诊断/不完整会话；1=配置、SDK、保存等错误。
 
@@ -106,5 +114,5 @@ cmake --build build/live-calibration --target dart_live_stereo_calibration_test 
 ctest --test-dir build/live-calibration -R '^(live_stereo_calibration|camera_input)$' --output-on-failure
 ```
 
-覆盖不同分辨率/焦距的外参恢复、K/D 不变、实时原图角点精修、左侧远处小棋盘（合成图原始每格 8/10/12/22 像素，22 像素近似当前内参下的 14 m 正对情况）、无棋盘时清除旧角点、角点反序、接收时间差与双侧停稳、错误图对暴露与删除、保存格式及双侧界面渲染。
+覆盖不同分辨率/焦距的外参恢复、解析雅可比与中心差分逐列比较、正负 x 与三轴越界解约束、边界参数极值、约束后 E/F 与逐对 RMS 一致性、K/D 不变、实时原图角点精修、左侧远处小棋盘（合成图原始每格 8/10/12/22 像素，22 像素近似当前内参下的 14 m 正对情况）、无棋盘时清除旧角点、角点反序、接收时间差与双侧停稳、错误图对暴露与删除、保存格式及双侧界面渲染。
 这些检查不连接真实相机。实际 SDK 连接、现场处理速度、棋盘识别和最终距离精度仍需实机验收。
