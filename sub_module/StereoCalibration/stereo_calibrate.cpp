@@ -690,6 +690,34 @@ Epipolar MeasureEpipolar(const std::vector<cv::Point2f>& leftPoints,const std::v
     result.maximum=*std::max_element(result.maxSide.begin(),result.maxSide.end()); return result;
 }
 
+void UpdateEpipolarMetrics(Solution& result,const Camera& left,const Camera& right) {
+    Require(!result.pairs.empty(),"No image pairs for error evaluation");
+    result.perPair.clear();
+    std::vector<double> maxErrors; double squared=0;
+    for(auto& pair:result.pairs) {
+        auto error=MeasureEpipolar(pair.pair.left,pair.pair.right,left,right,result.F);
+        squared+=error.rms*error.rms*error.maxSide.size(); pair.pair.epipolarRms=error.rms;
+        maxErrors.insert(maxErrors.end(),error.maxSide.begin(),error.maxSide.end());
+        result.perPair.push_back(std::move(error));
+    }
+    result.epiRms=std::sqrt(squared/maxErrors.size()); result.epiP95=Quantile(maxErrors,.95);
+    result.epiMax=*std::max_element(maxErrors.begin(),maxErrors.end());
+}
+Solution UnconstrainedSolution(const Solution& bounded,const Camera& left,const Camera& right,int minimumPairs) {
+    const auto& initial=bounded.translationConstraint;
+    Require(initial.initialR.size()==cv::Size(3,3) && initial.initialT.total()==3 &&
+        initial.initialE.size()==cv::Size(3,3) && initial.initialF.size()==cv::Size(3,3) &&
+        initial.initialErrors.rows==static_cast<int>(bounded.pairs.size()) && initial.initialErrors.cols==2 &&
+        cv::checkRange(initial.initialR) && cv::checkRange(initial.initialT) && cv::checkRange(initial.initialE) &&
+        cv::checkRange(initial.initialF) && cv::checkRange(initial.initialErrors) && std::isfinite(initial.initialRms),
+        "Original unconstrained calibration snapshot is incomplete");
+    Solution result;result.pairs=bounded.pairs;
+    result.R=initial.initialR;result.T=initial.initialT;result.E=initial.initialE;result.F=initial.initialF;
+    result.errors=initial.initialErrors;result.rms=initial.initialRms;
+    UpdateEpipolarMetrics(result,left,right);
+    result.passed=result.pairs.size()>=static_cast<std::size_t>(minimumPairs) && result.rms<=kMaxRmsPx && result.epiP95<=kMaxEpipolarP95Px;
+    return result;
+}
 Solution Solve(std::vector<LivePair> pairs,const Camera& left,const Camera& right,int minimumPairs) {
     Solution result; result.pairs=std::move(pairs); if(result.pairs.size()<3) return result;
     std::vector<cv::Point3f> board;
@@ -711,15 +739,7 @@ Solution Solve(std::vector<LivePair> pairs,const Camera& left,const Camera& righ
     result.translationConstraint=RefineStereoTranslation(board,lp,rp,{left.K,left.D,right.K,right.D},
         result.R,result.T,result.E,result.F,result.errors,result.rms);
     Require(result.errors.rows==static_cast<int>(result.pairs.size()) && result.errors.cols==2 && cv::checkRange(result.errors),"Invalid per-camera pair errors");
-    std::vector<double> maxErrors; double squared=0;
-    for(auto& pair:result.pairs) {
-        auto error=MeasureEpipolar(pair.pair.left,pair.pair.right,left,right,result.F);
-        squared+=error.rms*error.rms*error.maxSide.size(); pair.pair.epipolarRms=error.rms;
-        maxErrors.insert(maxErrors.end(),error.maxSide.begin(),error.maxSide.end());
-        result.perPair.push_back(std::move(error));
-    }
-    result.epiRms=std::sqrt(squared/maxErrors.size()); result.epiP95=Quantile(maxErrors,.95);
-    result.epiMax=*std::max_element(maxErrors.begin(),maxErrors.end());
+    UpdateEpipolarMetrics(result,left,right);
     result.passed=result.translationConstraint.converged && result.pairs.size()>=static_cast<std::size_t>(minimumPairs) && result.rms<=kMaxRmsPx && result.epiP95<=kMaxEpipolarP95Px;
     return result;
 }
@@ -733,7 +753,10 @@ std::size_t Worst(const Solution& s) {
     return worst;
 }
 
-void Save(const Options& o,const Camera& left,const Camera& right,const Solution& s) {
+// Prepare both result variants before publishing the completed files.
+void PrepareReport(const Options& o,const Camera& left,const Camera& right,const Solution& s,bool constrained) {
+    const std::string stem=constrained?"stereo":"stereo_unconstrained";
+    const std::string referenceStem=constrained?"reference":"reference_unconstrained";
     Require(!s.R.empty(),"Need at least 3 solved pairs before saving stereo.yaml");
     std::vector<std::size_t> referenceIndices;
     std::vector<std::size_t> order(s.pairs.size()); std::iota(order.begin(),order.end(),0);
@@ -750,8 +773,8 @@ void Save(const Options& o,const Camera& left,const Camera& right,const Solution
         const auto label="Pair "+std::to_string(s.pairs[i].pair.number)+(i==worst?" WORST":" MEDIAN")+"; epipolar P95="+Number(s.perPair[i].p95)+" px";
         FullReferenceRow(s.pairs[i].pair,left,right,s.F,label).copyTo(reference(cv::Rect(0,75+kReferenceRowHeight*static_cast<int>(row),1440,kReferenceRowHeight)));
     }
-    Require(cv::imwrite((o.output/"reference.pending.png").string(),reference),"Cannot write reference image");
-    cv::FileStorage yaml((o.output/"stereo.pending.yaml").string(),cv::FileStorage::WRITE);
+    Require(cv::imwrite((o.output/(referenceStem+".pending.png")).string(),reference),"Cannot write reference image");
+    cv::FileStorage yaml((o.output/(stem+".pending.yaml")).string(),cv::FileStorage::WRITE);
     Require(yaml.isOpened(),"Cannot write stereo report");
     yaml<<"status"<<(s.passed?"passes_basic_checks_not_distance_validated":"needs_recapture_or_investigation")
         <<"quality_passed"<<static_cast<int>(s.passed)<<"distance_validated"<<0
@@ -775,8 +798,16 @@ void Save(const Options& o,const Camera& left,const Camera& right,const Solution
         <<"timestamp_semantics"<<"host steady_clock receive time; not exposure synchronization"
         <<"capture_requirement"<<"fixed rig; same stationary board pose during both exposures"
         <<"corner_alignment"<<"near-parallel rig: reverse right 180-degree ordering if row directions oppose"
-        <<"reference_image"<<"reference.png"<<"rectification_by_left_roi"<<"["<<"]";
-    WriteTranslationConstraint(yaml,s.translationConstraint);
+        <<"reference_image"<<(referenceStem+".png")<<"rectification_by_left_roi"<<"["<<"]";
+    if(constrained) {
+        WriteTranslationConstraint(yaml,s.translationConstraint);
+        yaml<<"unconstrained_result_file"<<"stereo_unconstrained.yaml";
+    } else {
+        yaml<<"translation_constraint"<<"{"<<"enabled"<<0
+            <<"coordinate_frame"<<"right_camera_optical_x_right_y_down_z_forward"
+            <<"optimizer"<<"OpenCV stereoCalibrate CALIB_FIX_INTRINSIC without translation bounds"<<"}"
+            <<"constrained_result_file"<<"stereo.yaml";
+    }
     yaml<<"pairs"<<"[";
     for(std::size_t i=0;i<s.pairs.size();++i) {
         const auto& p=s.pairs[i];
@@ -792,10 +823,19 @@ void Save(const Options& o,const Camera& left,const Camera& right,const Solution
             <<"epipolar_rms_px"<<s.perPair[i].rms<<"epipolar_p95_px"<<s.perPair[i].p95<<"}";
     }
     yaml<<"]"; yaml.release();
-    fs::rename(o.output/"reference.pending.png",o.output/"reference.png");
-    fs::rename(o.output/"stereo.pending.yaml",o.output/"stereo.yaml");
+}
+void Save(const Options& o,const Camera& left,const Camera& right,const Solution& s) {
+    const auto unconstrained=UnconstrainedSolution(s,left,right,o.minPairs);
+    PrepareReport(o,left,right,s,true);
+    PrepareReport(o,left,right,unconstrained,false);
+    for(const auto& stem:{std::string("reference"),std::string("reference_unconstrained")})
+        fs::rename(o.output/(stem+".pending.png"),o.output/(stem+".png"));
+    for(const auto& stem:{std::string("stereo"),std::string("stereo_unconstrained")})
+        fs::rename(o.output/(stem+".pending.yaml"),o.output/(stem+".yaml"));
     std::cout<<"Saved "<<o.output/"stereo.yaml"<<"; pairs="<<s.pairs.size()<<" RMS="<<s.rms
-             <<" px epipolar P95="<<s.epiP95<<" px baseline="<<cv::norm(s.T)<<" mm; quality="<<s.passed<<'\n';
+             <<" px epipolar P95="<<s.epiP95<<" px baseline="<<cv::norm(s.T)<<" mm; quality="<<s.passed<<'\n'
+             <<"Saved "<<o.output/"stereo_unconstrained.yaml"<<"; RMS="<<unconstrained.rms
+             <<" px epipolar P95="<<unconstrained.epiP95<<" px T_mm="<<unconstrained.T.t()<<'\n';
 }
 
 

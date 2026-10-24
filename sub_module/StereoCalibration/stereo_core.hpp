@@ -60,6 +60,7 @@ std::uint64_t TimestampDifference(std::int64_t,std::int64_t);
 bool AlignRight(const std::vector<cv::Point2f>&,std::vector<cv::Point2f>&);
 Epipolar MeasureEpipolar(const std::vector<cv::Point2f>&,const std::vector<cv::Point2f>&,const Camera&,const Camera&,const cv::Mat&);
 Solution Solve(std::vector<LivePair>,const Camera&,const Camera&,int);
+Solution UnconstrainedSolution(const Solution&,const Camera&,const Camera&,int);
 std::size_t Worst(const Solution&);
 void Save(const Options&,const Camera&,const Camera&,const Solution&);
 } // namespace stereo_live

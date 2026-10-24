@@ -42,7 +42,7 @@ struct TranslationBounds {
 
 struct FixedStereoIntrinsics { cv::Mat leftK,leftD,rightK,rightD; };
 struct TranslationConstraintReport {
-    cv::Mat initialR,initialT;
+    cv::Mat initialR,initialT,initialE,initialF,initialErrors;
     double initialRms=0;
     cv::Vec3d lowerMm,upperMm;
     int iterations=0;
@@ -155,6 +155,8 @@ inline TranslationConstraintReport RefineStereoTranslation(const std::vector<cv:
     const FixedStereoIntrinsics& cameras,cv::Mat& R,cv::Mat& T,cv::Mat& E,cv::Mat& F,cv::Mat& errors,double& rms) {
     TranslationConstraintReport report;
     report.initialR=R.clone(); report.initialT=T.clone(); report.initialRms=rms;
+    // Preserve the original OpenCV result before bounded refinement reuses output buffers.
+    report.initialE=E.clone(); report.initialF=F.clone(); report.initialErrors=errors.clone();
     auto problem=cv::makePtr<BoundedStereoProblem>(board,left,right,cameras,T.at<double>(0));
     report.lowerMm=problem->bounds.lower(); report.upperMm=problem->bounds.upper();
     cv::Mat parameters=problem->initialize(R,T);

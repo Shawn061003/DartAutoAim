@@ -96,7 +96,10 @@ BMP 文件名成对相同，`dataset.yaml` 记录真实帧号和时间戳。图�
 - `Input/annotations.yaml` 自动保存框选、角点、接受/跳过状态。重新进入会恢复，并检查原始文件的名称、尺寸信息和修改时间；更换图片后不沿用旧角点。
 - 默认新建同级 `Results/calibration_<时间>/`，也可用 `--output=/NEW/directory` 指定新目录。
 - `stereo.yaml` 记录最终参与的图对、原图角点、源帧信息、R/T/E/F、重投影与极线误差，以及约束前后的 T/RMS。
-- `reference.png` 显示中位和最差图对的局部极线参考图和原图。
+- `reference.png` 显示受约束解中位和最差图对的局部极线参考图和原图。
+- `stereo_unconstrained.yaml` 单独保存同一批已接受图对的 **无 T 约束**结果：R、T_mm、E、F_reference、基线、总体 RMS、极线误差及逐对左右 RMS，并标记 `translation_constraint.enabled: 0`。它是约束优化前的原始 `stereoCalibrate(CALIB_FIX_INTRINSIC)` 解，两侧 K/D 仍固定。
+- `reference_unconstrained.png` 使用无约束解自己的 F 和误差选择中位/最差图对并绘制参考图。两套结果分别评价质量，均保留 `distance_validated: 0`。
+- 按 S 和正常退出自动保存时都会生成以上两套结果；图对相同，质量和误差指标各自计算。
 - 支持直接导入配对 BMP：两边文件名相同，或使用 `left1.bmp/right1.bmp`。只使用同 ID 图对；孤立文件会提示并忽略，重复 ID 报错。缺少采集清单时帧时间标记为未知，不冒充同步图对。
 
 显示总体 RMS、极线 P95/最大值、基线、R、T、约束前 RMS、边界命中和质量状态。

@@ -181,7 +181,7 @@ class Review {
         if(solved_.R.empty() || solvedRevision_!=revision_) {status_="Annotations saved; need an updated fit with at least 3 accepted pairs for a report";return;}
         const auto snapshot=solved_;const auto options=reportOptions();const auto left=left_,right=right_;const auto rev=revision_;
         saving_=std::async(std::launch::async,[snapshot,options,left,right,rev] {Save(options,left,right,snapshot);return rev;});
-        status_="Saving stereo.yaml and reference.png in background";
+        status_="Saving constrained + unconstrained calibration reports in background";
     }
 public:
     Review(Settings settings,Camera left,Camera right):settings_(std::move(settings)),left_(std::move(left)),right_(std::move(right)),dataset_(ReadDataset(settings_.input)) {
@@ -199,7 +199,7 @@ public:
     std::size_t currentIndex() const {return index_;}
     void update() {
         if(saving_.valid() && saving_.wait_for(std::chrono::seconds(0))==std::future_status::ready) {
-            try {savedRevision_=saving_.get();status_=savedRevision_==revision_?"Saved current stereo.yaml + reference.png":"Previous revision saved; current selection has changed";}
+            try {savedRevision_=saving_.get();status_=savedRevision_==revision_?"Saved constrained + unconstrained results and reference images":"Previous revision saved; current selection has changed";}
             catch(const std::exception& e){status_=std::string("Report save failed: ")+e.what();}
         }
         if(fitting_.valid() && fitting_.wait_for(std::chrono::seconds(0))==std::future_status::ready) {

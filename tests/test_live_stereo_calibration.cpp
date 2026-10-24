@@ -132,6 +132,7 @@ int main() {
         const auto positive=Solve(Synthetic(left,right,R,positiveT,root),left,right,10);
         Check(positive.passed && positive.T.at<double>(0)>0 && cv::norm(positive.T-positiveT)<1 &&
               TranslationBounds(510).contains(positive.T),cv::format("Positive-X fit failed: Tx=%.3f error=%.3f rms=%.4f epi=%.4f converged=%d iterations=%d",positive.T.at<double>(0),cv::norm(positive.T-positiveT),positive.rms,positive.epiP95,positive.translationConstraint.converged,positive.translationConstraint.iterations));
+        Solution outsideForSave;
         for (const cv::Vec3d& outside : {cv::Vec3d(-650,-4,35),cv::Vec3d(-490,35,35),cv::Vec3d(-490,-4,160),cv::Vec3d(-800,120,300)}) {
             const cv::Mat actual=(cv::Mat_<double>(3,1)<<outside[0],outside[1],outside[2]);
             const auto constrained=Solve(Synthetic(left,right,R,actual,root),left,right,10);
@@ -140,7 +141,16 @@ int main() {
             Check(constrained.rms>constrained.translationConstraint.initialRms+1e-4 &&
                   cv::norm(constrained.R.t()*constrained.R-cv::Mat::eye(3,3,CV_64F))<1e-9,
                   "Constrained fit hid residual increase or produced an invalid rotation");
-            if (outside[0]==-800) Check(!constrained.passed,"Incompatible baseline observations were marked as quality passed");
+            const auto free=UnconstrainedSolution(constrained,left,right,10);
+            Check(cv::norm(free.T-actual)<1 && free.rms<.05 && free.epiP95<.08 && free.passed &&
+                  cv::norm(free.errors-constrained.translationConstraint.initialErrors)==0,
+                  "Unconstrained snapshot was overwritten by bounded refinement or evaluated with bounded errors");
+            const double freeRms=std::sqrt(cv::norm(free.errors,cv::NORM_L2SQR)/(2*free.errors.rows));
+            Check(std::abs(freeRms-free.rms)<1e-7,"Unconstrained per-camera errors do not match its RMS");
+            if (outside[0]==-800) {
+                Check(!constrained.passed,"Incompatible baseline observations were marked as quality passed");
+                outsideForSave=constrained;
+            }
             const double tx=constrained.T.at<double>(0),ty=constrained.T.at<double>(1),tz=constrained.T.at<double>(2);
             const cv::Mat skew=(cv::Mat_<double>(3,3)<<0.,-tz,ty,tz,0.,-tx,-ty,tx,0.);
             Check(cv::norm(constrained.E-skew*constrained.R)<1e-10 &&
@@ -212,6 +222,35 @@ int main() {
               static_cast<int>(report["translation_constraint"]["enabled"])==1 &&
               static_cast<std::string>(report["translation_constraint"]["coordinate_frame"])=="right_camera_optical_x_right_y_down_z_forward",
               "Export omitted the optical-frame bounds or the unconstrained diagnostic T");
+        const auto freePath=root/"stereo_unconstrained.yaml";
+        cv::FileStorage freeReport(freePath.string(),cv::FileStorage::READ);cv::Mat freeSavedT;
+        freeReport["T_mm"]>>freeSavedT;
+        Check(freeReport.isOpened() && cv::norm(freeSavedT-fitted.translationConstraint.initialT)==0 &&
+              static_cast<int>(freeReport["translation_constraint"]["enabled"])==0 &&
+              fs::exists(root/"reference_unconstrained.png"),"Unconstrained companion report/reference was not saved");
+        // An incompatible physical baseline must stay out of bounds in the unrestricted output.
+        auto compareOptions=options;compareOptions.output=root/"comparison";fs::create_directory(compareOptions.output);
+        Save(compareOptions,left,right,outsideForSave);
+        cv::FileStorage boundedDisk((compareOptions.output/"stereo.yaml").string(),cv::FileStorage::READ);
+        cv::FileStorage freeDisk((compareOptions.output/"stereo_unconstrained.yaml").string(),cv::FileStorage::READ);
+        cv::Mat boundedT,unboundedT,unboundedR,unboundedE,unboundedF,unboundedErrors;
+        boundedDisk["T_mm"]>>boundedT;freeDisk["T_mm"]>>unboundedT;freeDisk["R"]>>unboundedR;freeDisk["E"]>>unboundedE;freeDisk["F_reference"]>>unboundedF;
+        Check(TranslationBounds(-510).contains(boundedT) && !TranslationBounds(-510).contains(unboundedT) &&
+              cv::norm(unboundedT-outsideForSave.translationConstraint.initialT)==0 &&
+              cv::norm(unboundedR-outsideForSave.translationConstraint.initialR)==0 &&
+              cv::norm(unboundedE-outsideForSave.translationConstraint.initialE)==0 &&
+              cv::norm(unboundedF-outsideForSave.translationConstraint.initialF)==0,
+              "Saved unrestricted matrices are incomplete or accidentally use constrained outputs");
+        Check(static_cast<int>(boundedDisk["quality_passed"])==0 && static_cast<int>(freeDisk["quality_passed"])==1 &&
+              freeDisk["pairs"].size()==boundedDisk["pairs"].size() &&
+              static_cast<std::string>(freeDisk["reference_image"])=="reference_unconstrained.png",
+              "Unconstrained quality or paired-sample membership copied from constrained result");
+        for(std::size_t i=0;i<outsideForSave.pairs.size();++i) {
+            Check(static_cast<int>(freeDisk["pairs"][i]["number"])==static_cast<int>(boundedDisk["pairs"][i]["number"]) &&
+                  static_cast<std::string>(freeDisk["pairs"][i]["left_image"])==static_cast<std::string>(boundedDisk["pairs"][i]["left_image"]) &&
+                  std::abs(static_cast<double>(freeDisk["pairs"][i]["left_rms_px"])-outsideForSave.translationConstraint.initialErrors.at<double>(static_cast<int>(i),0))<1e-12,
+                  "Unconstrained report changed pair identity or copied bounded per-pair residuals");
+        }
         // Use the just-saved monocular schema as an optional override, and refuse accidental resize/crop mismatch.
         const auto intrinsics=root/"left_intrinsics.yaml";
         { cv::FileStorage file(intrinsics.string(),cv::FileStorage::WRITE);

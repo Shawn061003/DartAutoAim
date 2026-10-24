@@ -116,6 +116,12 @@ int main() {
         Check(static_cast<std::string>(report["capture_mode"])=="offline_manual_roi_native_full_frames" && report["pairs"].size()==3 &&
               static_cast<int>(report["pairs"][0]["frame_timestamps_available"])==0 && static_cast<int>(report["pairs"][0]["host_timestamp_diff_ms"])==-1,
               "Offline report misreported fit membership or unknown exposure/receive times");
+        cv::FileStorage unrestricted((settings.output/"stereo_unconstrained.yaml").string(),cv::FileStorage::READ);
+        Check(unrestricted.isOpened() && unrestricted["pairs"].size()==report["pairs"].size() &&
+              static_cast<int>(unrestricted["translation_constraint"]["enabled"])==0 &&
+              static_cast<std::string>(unrestricted["capture_mode"])=="offline_manual_roi_native_full_frames" &&
+              static_cast<int>(unrestricted["pairs"][0]["frame_timestamps_available"])==0 && fs::exists(settings.output/"reference_unconstrained.png"),
+              "Offline save did not include a matching complete unrestricted calibration report");
         std::cout<<"Stereo workflow passed. Artifacts: "<<root<<'\n';return 0;
     }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
 }
