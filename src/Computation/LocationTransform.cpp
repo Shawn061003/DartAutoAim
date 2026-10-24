@@ -1,9 +1,17 @@
-// 负责坐标变换，把右相机光心坐标系下的坐标转换为镖口坐标系
-// 镖口坐标系原点为飞镖轨道终点，既飞镖飞出的起点
-// 定义飞镖飞出方向向量在地面上的投影向量为y轴，沿飞出方向的右边为x轴
-// 垂直地面方向为z轴
+#include "Computation/LocationTransform.h"
 
-/*
-输入:目标在右相机光心坐标系下的坐标
-输出：目标在镖口坐标系下的坐标
-*/
+std::vector<LocationTransform::LocationTransformResult> LocationTransform::RunTransform(
+    const std::vector<StereoscopicMeasurement::StereoscopicMeasurementResult>& results) const
+{
+    std::vector<LocationTransformResult> transformed;
+    transformed.reserve(results.size());
+    const cv::Matx33d rotation = rightCameraToDartR_;
+    const cv::Vec3d translation(rightCameraToDartTmm_.at<double>(0, 0),
+                              rightCameraToDartTmm_.at<double>(1, 0),
+                              rightCameraToDartTmm_.at<double>(2, 0));
+    for (const auto& result : results) {
+        const cv::Vec3d point(result.RealLocation.x, result.RealLocation.y, result.RealLocation.z);
+        transformed.push_back({cv::Point3d(rotation * point + translation), result.TargetName});
+    }
+    return transformed;
+}

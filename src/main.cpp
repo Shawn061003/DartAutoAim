@@ -6,6 +6,7 @@
 #include "Perception/YOLOinfer.h"
 #include "Perception/GuideLightDetect.h"
 #include "Computation/StereoscopicMeasurement.h"
+#include "Computation/LocationTransform.h"
 #include "Visualization/Visualize.h"
 
 #include <chrono>
@@ -143,6 +144,8 @@ int runCameraMode(const DartCongfig& config)
     YOLOInference yolo(config.yolo);
     GuideLightDetect guideLight(config.guideLight);
     StereoscopicMeasurement stereoscopicmeasurement(config.leftCamera, config.rightCamera, config.stereoscopicmeasurement.R, config.stereoscopicmeasurement.T);
+    LocationTransform locationtransform(config.locationTransform.R, config.locationTransform.T);
+
     if (stopSignals.stopRequested()) return 0;
     input.StartCamera();
     std::cout << "Camera perception started. Press Ctrl+C to stop.\n" << std::flush;
@@ -157,10 +160,10 @@ int runCameraMode(const DartCongfig& config)
 
         // 4. 完成左右帧的 YOLO ROI 提取和引导灯检测，保持原图坐标及帧来源。
         const auto detections = processFrame(*frame, yolo, guideLight);
-        // 5. 双目测距与可视化；空结果刷新为空面板，不沿用之前的目标。
+        // 5. 双目测距；空结果刷新为空面板，不沿用之前的目标。
         const auto measurements = stereoscopicmeasurement.RunMeasurement(detections);
-        StereoscopicMeasurementVisualize::Show(
-            makeMeasurementVisualize(*frame, config.stereoscopicmeasurement.T, measurements), 1);
+        // 6. 坐标转换。
+        const auto locations = locationtransform.RunTransform(measurements);
     }
 
     // 6. 正常退出显式停止；初始化或检测抛异常时由 CameraInput 析构完成同样清理。

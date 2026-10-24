@@ -170,7 +170,9 @@ if(DART_BUILD_MAIN)
     # 测距需要calib3d，独立于标定工具的编译开关。
     find_package(OpenCV REQUIRED COMPONENTS core calib3d)
     add_executable(dart_vision src/main.cpp)
-    target_sources(dart_vision PRIVATE src/Computation/StereoscopicMeasurement.cpp)
+    target_sources(dart_vision PRIVATE
+        src/Computation/StereoscopicMeasurement.cpp
+        src/Computation/LocationTransform.cpp)
     # 默认配置定位到源码目录；模型和媒体路径由 YAML 所在目录解析。
     target_compile_definitions(dart_vision PRIVATE DART_PROJECT_ROOT="${CMAKE_CURRENT_SOURCE_DIR}")
     target_compile_options(dart_vision PRIVATE -Wall -Wextra -Wpedantic)
@@ -180,7 +182,9 @@ if(DART_BUILD_MAIN)
     if(BUILD_TESTING)
         # 相机主循环测试使用设备/感知替身；验证配对、退出和显示数据传递，不访问相机或窗口。
         add_executable(dart_camera_mode_test tests/test_camera_mode.cpp)
-        target_sources(dart_camera_mode_test PRIVATE src/Computation/StereoscopicMeasurement.cpp)
+        target_sources(dart_camera_mode_test PRIVATE
+            src/Computation/StereoscopicMeasurement.cpp
+            src/Computation/LocationTransform.cpp)
         target_link_libraries(dart_camera_mode_test PRIVATE dart::config dart::acquisition opencv_calib3d)
         target_compile_definitions(dart_camera_mode_test PRIVATE
             DART_PROJECT_ROOT="${CMAKE_CURRENT_SOURCE_DIR}")

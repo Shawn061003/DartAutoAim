@@ -90,3 +90,15 @@ stereo_calibration:
       cols: 1
       dt: d
       data: [ -4.7634223614970233e+02, -2.4918748431355193e+00, 2.8778709134123977e+02 ]
+
+location_transform:
+   R: !!opencv-matrix
+      rows: 3
+      cols: 3
+      dt: d
+      data: [ 1., 0., 0., 0., 0., 1., 0., -1., 0. ]
+   T_mm: !!opencv-matrix
+      rows: 3
+      cols: 1
+      dt: d
+      data: [ 240.0, -18.83, 231.45 ]

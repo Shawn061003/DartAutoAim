@@ -201,6 +201,14 @@ StereoscopicMeasurementParams readStereoscopicMeasurement(const cv::FileNode& no
     return result;
 }
 
+LocationTransformParams readLocationTransform(const cv::FileNode& node)
+{
+    LocationTransformParams result;
+    result.R = readMatrix(node, "R", "location_transform");
+    result.T = readMatrix(node, "T_mm", "location_transform");
+    return result;
+}
+
 } // namespace
 
 DartCongfig::DartCongfig(const std::string& configPath)
@@ -223,6 +231,7 @@ void DartCongfig::load(const std::string& configPath)
         auto nextYOLO = readYOLO(section(root, "yolo"), base);
         auto nextGuideLight = readGuideLight(section(root, "guide_light"));
         auto nextStereoscopicMeasurement = readStereoscopicMeasurement(section(root,"stereo_calibration"));
+        auto nextLocationTransform = readLocationTransform(section(root, "location_transform"));
 
         // 全部板块校验通过后提交，任何解析错误都保留之前的配置。
         input = std::move(nextInput);
@@ -232,6 +241,7 @@ void DartCongfig::load(const std::string& configPath)
         yolo = std::move(nextYOLO);
         guideLight = nextGuideLight;
         stereoscopicmeasurement = std::move(nextStereoscopicMeasurement);
+        locationTransform = std::move(nextLocationTransform);
     } catch (const std::exception& error) {
         throw std::runtime_error("DartCongfig [" + configPath + "]: " + error.what());
     }

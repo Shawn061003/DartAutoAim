@@ -74,6 +74,11 @@ struct StereoscopicMeasurementParams{
     cv::Mat T;      // 左相机光心到右相机光心的平移矩阵
 };
 
+struct LocationTransformParams {
+    cv::Mat R;      // 右相机到镖口的旋转，含坐标轴转换，3x3 CV_64F。
+    cv::Mat T;      // 右相机光心在镖口坐标系中的位置，3x1 CV_64F，毫米。
+};
+
 // 左右相机共用字段定义，各自保存一份参数；数值字段的初始值为待配置值。
 struct CameraParams {
     std::string deviceIp;       // 相机设备 IP，启用相机前填写
@@ -92,7 +97,7 @@ struct CameraParams {
     double extraInfoDelay = 0.0; // extra_info 延迟（秒），启用相机前确认
 };
 
-// 统一配置：加载并保存输入、相机、队列与检测参数。
+// 统一配置：加载并保存输入、相机、队列、检测与计算参数。
 class DartCongfig
 {
 public:
@@ -101,6 +106,7 @@ public:
     YOLOParams yolo;
     GuideLightParams guideLight;
     StereoscopicMeasurementParams stereoscopicmeasurement;
+    LocationTransformParams locationTransform;
     
     // 类型别名便于调用方表达相机侧别，字段定义统一维护。
     using LeftCameraParams = CameraParams;
@@ -113,7 +119,7 @@ public:
     // configPath 支持绝对路径；相对路径以进程工作目录为基准。
     explicit DartCongfig(const std::string& configPath = "config/dart.yaml");
 
-    // 一次读取五个板块，全部校验通过后替换成员；失败保留原配置。
+    // 一次读取全部板块，全部校验通过后替换成员；失败保留原配置。
     // 媒体与模型相对路径统一以 YAML 所在目录为基准。
     // image/video 要求媒体路径非空；设备 IP 与曝光允许 TODO 占位。
     void load(const std::string& configPath);
