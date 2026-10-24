@@ -48,7 +48,7 @@ int main() {
         pair.left.image=cv::Mat(960,1280,CV_8UC3,cv::Scalar(210,210,210));pair.right.image=cv::Mat(720,960,CV_8UC3,cv::Scalar(210,210,210));
         const auto expectedLeft=Board(pair.left.image,{300,240},22),expectedRight=Board(pair.right.image,{160,180},30);
         pair.left.frame_id=123;pair.right.frame_id=456;pair.left.timestamp_ms=10000;pair.right.timestamp_ms=10004;
-        Check(cv::imwrite((root/"collection-dashboard.png").string(),CollectionDashboard(pair,0,true,5,1.,"Writing original BMP pair in background")),"Cannot render live collection preview");
+        Check(cv::imwrite((root/"collection-dashboard.png").string(),CollectionDashboard(pair,0,true,5,1.,"后台保存原始 BMP 图片组")),"Cannot render live collection preview");
         writer.append(pair);Check(writer.count()==1,"Collection lost a saved pair");
         Check(cv::norm(cv::imread((root/"capture/left/000001.bmp").string()),pair.left.image)==0 &&
               cv::norm(cv::imread((root/"capture/right/000001.bmp").string()),pair.right.image)==0,"BMP collection changed native pixels");
@@ -100,6 +100,22 @@ int main() {
         Check(review.solution().pairs.size()==3 && cv::norm(review.solution().T-translation)<.1 && review.solution().rms<.01,
               "Restored fit failed to recover known bounded extrinsics");
         Check(review.currentIndex()==3,"Review did not resume at the pending pair");
+        // Exercise both actual review input paths, including broken GTK wheel event coordinates.
+        const auto point=review.viewport(1).project({480,360});
+        review.mouse(cv::EVENT_RBUTTONDOWN,cvRound(point.x),cvRound(point.y),0);
+        review.mouse(cv::EVENT_RBUTTONUP,cvRound(point.x),cvRound(point.y),0);
+        Check(review.viewport(1).zoom>1 && review.viewport(0).zoom==1,"Right-click zoom chose the wrong stereo pane");
+        review.mouse(cv::EVENT_RBUTTONDOWN,cvRound(point.x),cvRound(point.y),cv::EVENT_FLAG_SHIFTKEY);
+        review.mouse(cv::EVENT_RBUTTONUP,cvRound(point.x),cvRound(point.y),cv::EVENT_FLAG_SHIFTKEY);
+        Check(std::abs(review.viewport(1).zoom-1)<1e-9,"Shift+right click did not zoom out");
+        review.mouse(cv::EVENT_MOUSEMOVE,cvRound(point.x),cvRound(point.y),0);
+        review.mouse(cv::EVENT_MOUSEHWHEEL,0,0,calibration_ui::gtkBackend()?-65536:120*65536);
+        Check(review.viewport(1).zoom>1 && review.viewport(0).zoom==1,"GTK wheel position was not restored");
+        review.key('3');const auto panCenter=review.viewport(1).center;const auto panZoom=review.viewport(1).zoom;
+        review.mouse(cv::EVENT_RBUTTONDOWN,1000,350,0);review.mouse(cv::EVENT_MOUSEMOVE,1040,370,cv::EVENT_FLAG_RBUTTON);review.mouse(cv::EVENT_RBUTTONUP,1040,370,0);
+        Check(cv::norm(review.viewport(1).center-panCenter)>1 && review.viewport(1).zoom==panZoom,"Right drag did not pan independently of zoom");
+        review.key('0');
+
         Check(cv::imwrite((root/"review-dashboard.png").string(),review.render()),"Cannot render paired-ROI review dashboard");
         Viewport lv,rv;lv.area={12,64,660,650};rv.area={684,64,660,650};lv.reset(left.referenceSize);rv.reset(right.referenceSize);
         Drag(review,lv,lr);review.update();review.key('n'); // Skip while its detector is running; the old result must not enter another image.
@@ -122,6 +138,24 @@ int main() {
               static_cast<std::string>(unrestricted["capture_mode"])=="offline_manual_roi_native_full_frames" &&
               static_cast<int>(unrestricted["pairs"][0]["frame_timestamps_available"])==0 && fs::exists(settings.output/"reference_unconstrained.png"),
               "Offline save did not include a matching complete unrestricted calibration report");
+        Settings list=settings;list.input=root/"List";list.output=root/"ListResult";
+        fs::create_directories(list.input/"left");fs::create_directory(list.input/"right");
+        for(int i=0;i<22;++i) for(const auto* side:{"left","right"})
+            Check(cv::imwrite((list.input/side/cv::format("%06d.bmp",i)).string(),cv::Mat(48,64,CV_8UC3,cv::Scalar(200,200,200))),"Cannot write scroll fixture");
+        auto listData=ReadDataset(list.input);
+        for(auto& r:listData.records) {
+            r.state=Record::State::Accepted;r.leftRoi=r.rightRoi={0,0,64,48};
+            for(int y=0;y<8;++y) for(int x=0;x<11;++x) r.sample.pair.left.emplace_back(4+4*x,4+4*y);
+            r.sample.pair.right=r.sample.pair.left;
+        }
+        SaveAnnotations(list.input/"annotations.yaml",listData.records);
+        auto tinyLeft=left,tinyRight=right;tinyLeft.referenceSize=tinyRight.referenceSize={64,48};Review listReview(list,tinyLeft,tinyRight);
+        listReview.mouse(cv::EVENT_MOUSEMOVE,1450,600,0);
+        listReview.mouse(cv::EVENT_MOUSEHWHEEL,0,0,calibration_ui::gtkBackend()?65536:-120*65536);
+        Check(listReview.listOffset()==3,"Stereo list wheel did not scroll down");
+        listReview.mouse(cv::EVENT_LBUTTONDOWN,1650,945,0);Check(listReview.listOffset()==4,"Stereo list button failed to clamp");
+        listReview.mouse(cv::EVENT_LBUTTONDOWN,1450,450,0);Check(listReview.currentIndex()==4,"Scrolled stereo row hit-testing selected the wrong pair");
+        listReview.key('[');Check(listReview.listOffset()==1,"Stereo list keyboard did not scroll up");
         std::cout<<"Stereo workflow passed. Artifacts: "<<root<<'\n';return 0;
     }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
 }

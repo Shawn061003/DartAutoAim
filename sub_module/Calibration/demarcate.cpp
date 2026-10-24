@@ -1,6 +1,7 @@
-// Live single-camera calibration: Hikrobot SDK + OpenCV 4.5.4 interactive calibration.
+// Single-camera BMP collection + offline manual ROI calibration.
 // Upstream support code and license: opencv_interactive_calibration/README.md.
-// ./build/demarcate --side=left [--config=config/dart.yaml] [--model=auto|full|narrow|k1]
+// ./build/demarcate --collect / --calibration --side=left
+#include "../calibration_ui.hpp"
 #include "Acquisition/CameraInput.h"
 #include "Acquisition/Quit.h"
 #include "common/DartConfig.h"
@@ -39,11 +40,13 @@ using Clock = std::chrono::steady_clock;
 constexpr const char* windowName = "Hikrobot - OpenCV interactive calibration";
 
 struct Options {
+    enum class Mode { Collect, Calibration };
+    Mode mode = Mode::Calibration;
     fs::path config = fs::path(DART_PROJECT_ROOT) / "config/dart.yaml";
-    fs::path output;
+    fs::path input, output;
     std::string side, model = "auto";
     cv::Size board{11, 8};
-    double squareMm = 30, holdSeconds = 0.8;
+    double squareMm = 30, interval = 1.;
     int minViews = 10, maxViews = 30;
     bool automatic = true;
 };
@@ -51,57 +54,70 @@ struct Options {
 Options parseOptions(int argc, char** argv)
 {
     cv::CommandLineParser parser(argc, argv,
-        "{help | | Show help without opening a camera}"
-        "{config | | dart.yaml path (input.mode is ignored; always live SDK capture)}"
-        "{side | | Required: left or right; only this camera is opened}"
-        "{output | | New output directory (must not exist)}"
-        "{model | auto | auto (official flags tuning), full, narrow or k1}"
+        "{help h | | Show help without opening a camera}"
+        "{collect | | Collect native BMP frames from the selected SDK camera}"
+        "{calibration | | Offline manual ROI annotation and monocular calibration}"
+        "{config | | dart.yaml path (collection camera settings only)}"
+        "{side | | Required: left or right}"
+        "{input | | BMP folder; default: sub_module/Calibration/Input/<side>}"
+        "{output | | New calibration result directory}"
+        "{interval | 1.0 | Seconds between automatic saved BMPs}"
+        "{model | auto | auto, full, narrow or k1}"
         "{cols | 11 | Chessboard inner corner columns}"
         "{rows | 8 | Chessboard inner corner rows}"
         "{square-mm | 30 | Physical square side in millimetres}"
-        "{hold | 0.8 | Stable duration in seconds before automatic capture}"
         "{min-views | 10 | Minimum views for quality evaluation}"
-        "{max-views | 30 | Maximum retained views; official filter removes excess}"
-        "{auto | true | Start with automatic capture enabled}");
-    if (parser.has("help")) { parser.printMessage(); return {}; }
-    Options o;
-    if (parser.has("config")) o.config = parser.get<std::string>("config");
-    o.side = parser.get<std::string>("side");
-    o.model = parser.get<std::string>("model");
-    o.board = {parser.get<int>("cols"), parser.get<int>("rows")};
-    o.squareMm = parser.get<double>("square-mm");
-    o.holdSeconds = parser.get<double>("hold");
-    o.minViews = parser.get<int>("min-views"); o.maxViews = parser.get<int>("max-views");
-    o.automatic = parser.get<bool>("auto");
-    if (!parser.check()) { parser.printErrors(); throw std::invalid_argument("Invalid command line"); }
-    // CommandLineParser accepts unrecognized keys, so reject them explicitly.
-    const std::vector<std::string> keys{"config", "side", "output", "model", "cols", "rows",
-        "square-mm", "hold", "min-views", "max-views", "auto"};
-    for (int i = 1; i < argc; ++i) {
-        std::string key = argv[i];
-        if (key.rfind("--", 0) != 0) throw std::invalid_argument("Use --name=value options");
-        key = key.substr(2, key.find('=') == std::string::npos ? std::string::npos : key.find('=') - 2);
-        if (std::find(keys.begin(), keys.end(), key) == keys.end())
-            throw std::invalid_argument("Unknown option: " + key);
+        "{max-views | 30 | Maximum selected views}"
+        "{auto | true | Start collection with automatic frame saving enabled}");
+    if (parser.has("help")) {
+        parser.printMessage();
+        std::cout << "./build/demarcate --collect --side=left [--interval=1]\n"
+                     "./build/demarcate --calibration --side=left [--input=/path/to/BMPs]\n"
+                     "Collection: A=auto/pause, SPACE=save next frame, Q/ESC=quit.\n"
+                     "Offline: LMB=ROI, wheel=zoom, RMB click=zoom in, Shift+RMB=zoom out, RMB drag=pan, SPACE=accept+next,\n"
+                     "N=skip, B/P=previous/next, R=clear ROI, D=remove, U=undo, S=save, +/-=zoom, [/]=list scroll, 0=reset zoom.\n";
+        return {};
     }
-    if (o.side != "left" && o.side != "right") throw std::invalid_argument("--side=left or --side=right is required");
-    if (o.model != "auto" && o.model != "full" && o.model != "narrow" && o.model != "k1")
-        throw std::invalid_argument("--model must be auto, full, narrow or k1");
-    if (o.board.width < 3 || o.board.height < 3 || o.board.width > 100 || o.board.height > 100 ||
-        !std::isfinite(o.squareMm) || o.squareMm <= 0 || o.squareMm > 10000 ||
-        !std::isfinite(o.holdSeconds) || o.holdSeconds < 0.1 || o.holdSeconds > 60 ||
-        o.minViews < 3 || o.maxViews <= o.minViews || o.maxViews > 100)
-        throw std::invalid_argument("Invalid board, hold duration, or view count limits");
+    const std::vector<std::string> keys{"collect", "calibration", "config", "side", "input", "output", "interval",
+        "model", "cols", "rows", "square-mm", "min-views", "max-views", "auto"};
+    for (int i=1; i<argc; ++i) {
+        const std::string arg=argv[i]; const auto equal=arg.find('=');
+        if (arg.rfind("--",0)!=0) throw std::invalid_argument("Use --collect / --calibration and --name=value options");
+        const auto key=arg.substr(2,equal==std::string::npos?equal:equal-2);
+        if (std::find(keys.begin(),keys.end(),key)==keys.end()) throw std::invalid_argument("Unknown option: "+key);
+        if ((key=="collect" || key=="calibration") ? equal!=std::string::npos : equal==std::string::npos)
+            throw std::invalid_argument("Use bare mode flags and --name=value options");
+    }
+    if (parser.has("collect")==parser.has("calibration")) throw std::invalid_argument("Choose exactly one of --collect or --calibration");
+    Options o;
+    o.mode=parser.has("collect")?Options::Mode::Collect:Options::Mode::Calibration;
+    if (parser.has("config")) o.config=parser.get<std::string>("config");
+    o.side=parser.get<std::string>("side"); o.model=parser.get<std::string>("model");
+    o.board={parser.get<int>("cols"),parser.get<int>("rows")}; o.squareMm=parser.get<double>("square-mm");
+    o.interval=parser.get<double>("interval"); o.minViews=parser.get<int>("min-views"); o.maxViews=parser.get<int>("max-views");
+    o.automatic=parser.get<bool>("auto");
+    if (!parser.check()) {parser.printErrors();throw std::invalid_argument("Invalid command line");}
+    if (o.side!="left" && o.side!="right") throw std::invalid_argument("--side=left or --side=right is required");
+    if (o.model!="auto" && o.model!="full" && o.model!="narrow" && o.model!="k1") throw std::invalid_argument("Invalid --model");
+    if (o.board.width<3 || o.board.height<3 || o.board.width>100 || o.board.height>100 ||
+        !std::isfinite(o.squareMm) || o.squareMm<=0 || o.squareMm>10000 ||
+        !std::isfinite(o.interval) || o.interval<.1 || o.interval>3600 ||
+        o.minViews<3 || o.maxViews<o.minViews || o.maxViews>100)
+        throw std::invalid_argument("Invalid board, interval or view count limits");
+    o.input=parser.has("input")?fs::path(parser.get<std::string>("input")):fs::path(DART_PROJECT_ROOT)/"sub_module/Calibration/Input"/o.side;
+    if (o.input.empty()) throw std::invalid_argument("--input cannot be empty");
+    o.input=fs::absolute(o.input);
     if (parser.has("output")) {
-        o.output = parser.get<std::string>("output");
+        o.output=parser.get<std::string>("output");
         if (o.output.empty()) throw std::invalid_argument("--output cannot be empty");
     } else {
-        const auto time = std::time(nullptr); std::tm local{}; localtime_r(&time, &local);
-        std::ostringstream name; name << "live_" << o.side << '_' << std::put_time(&local, "%Y%m%d_%H%M%S");
-        o.output = fs::path(DART_PROJECT_ROOT) / "CalibrationResults" / name.str();
+        const auto now=std::time(nullptr);std::tm local{};localtime_r(&now,&local);
+        std::ostringstream name;name<<o.side<<'_'<<std::put_time(&local,"%Y%m%d_%H%M%S");
+        o.output=fs::path(DART_PROJECT_ROOT)/"sub_module/Calibration/Results"/name.str();
     }
-    o.output = fs::absolute(o.output);
-    if (fs::exists(o.output)) throw std::invalid_argument("Output already exists; choose a new directory: " + o.output.string());
+    o.output=fs::absolute(o.output);
+    if (o.mode==Options::Mode::Calibration && fs::exists(o.output))
+        throw std::invalid_argument("Output already exists; choose a new directory: "+o.output.string());
     return o;
 }
 
@@ -307,8 +323,8 @@ void saveReport(const Options& o, const Solution& solution) {
          << "camera_matrix" << d.cameraMatrix << "distortion_coefficients" << d.distCoeffs.reshape(1,5)
          << "distortion_order" << "k1,k2,p1,p2,k3" << "coordinate_system" << "native_full_image_zero_offset"
          << "camera_side" << o.side << "config_source" << fs::absolute(o.config).string()
-         << "source_directory" << o.output.string() << "calibration_model" << o.model << "calibration_flags" << solution.flags
-         << "calibration_backend" << "OpenCV 4.5.4 interactive calibration (SDK adaptation)"
+         << "source_directory" << o.input.string() << "capture_mode" << "offline_manual_roi_native_full_frames" << "calibration_model" << o.model << "calibration_flags" << solution.flags
+         << "calibration_backend" << "OpenCV interactive calibration (offline ROI)"
          << "used_views" << static_cast<int>(solution.samples.size())
          << "rms_reprojection_error_px" << d.totalAvgErr
          << "std_deviations_intrinsics" << d.stdDeviations << "per_view_rms_px" << d.perViewErrors
@@ -329,7 +345,20 @@ void saveReport(const Options& o, const Solution& solution) {
 }
 
 void text(cv::Mat& canvas, const std::string& value, int x, int y, cv::Scalar color = {230,230,230}) {
-    cv::putText(canvas, value, {x,y}, cv::FONT_HERSHEY_SIMPLEX, 0.48, color, 1, cv::LINE_AA);
+    calibration_ui::text(canvas,value,{x,y},18,color);
+}
+
+void drawCoverage(cv::Mat& canvas, cv::Size size, const std::vector<Sample>& samples) {
+    // Native sensor corner occupancy; preview scaling never enters calibration.
+    cv::Mat coverage(200,400,CV_8UC3,cv::Scalar(40,40,40));
+    if (!size.empty()) for (const auto& sample : samples) for (const auto& p : sample.points) {
+        const int gx = std::clamp(static_cast<int>(p.x*10/size.width),0,9);
+        const int gy = std::clamp(static_cast<int>(p.y*10/size.height),0,9);
+        cv::rectangle(coverage,{gx*40,gy*20,40,20},{55,140,55},cv::FILLED);
+    }
+    for (int i=0;i<=10;++i) { cv::line(coverage,{i*40,0},{i*40,199},{85,85,85}); cv::line(coverage,{0,i*20},{399,i*20},{85,85,85}); }
+    coverage.copyTo(canvas(cv::Rect(10,675,400,200)));
+    text(canvas,"已覆盖区域（原始图像坐标）",10,660);
 }
 
 cv::Mat dashboard(const cv::Mat& annotated, const Options& o, const std::vector<Sample>& samples,
@@ -385,17 +414,7 @@ cv::Mat dashboard(const cv::Mat& annotated, const Options& o, const std::vector<
         line(std::string("Coverage: ") + (solved.coverageOK ? "OK" : "NEED MORE"));
         line("Applied flags: " + std::to_string(solved.flags));
     }
-    // Native sensor corner occupancy; preview scaling never enters calibration.
-    cv::Mat coverage(200,400,CV_8UC3,cv::Scalar(40,40,40));
-    const cv::Size size = solved.data ? solved.data->imageSize : annotated.size();
-    if (!size.empty()) for (const auto& sample : samples) for (const auto& p : sample.points) {
-        const int gx = std::clamp(static_cast<int>(p.x*10/size.width),0,9);
-        const int gy = std::clamp(static_cast<int>(p.y*10/size.height),0,9);
-        cv::rectangle(coverage,{gx*40,gy*20,40,20},{55,140,55},cv::FILLED);
-    }
-    for (int i=0;i<=10;++i) { cv::line(coverage,{i*40,0},{i*40,199},{85,85,85}); cv::line(coverage,{0,i*20},{399,i*20},{85,85,85}); }
-    coverage.copyTo(canvas(cv::Rect(10,675,400,200)));
-    text(canvas,"Corner coverage (native sensor)",10,660);
+    drawCoverage(canvas,solved.data?solved.data->imageSize:annotated.size(),samples);
     text(canvas,status.substr(0,95),435,690,{80,220,255});
     text(canvas,"SPACE: capture | A: auto/manual | R: undo | D: clear",435,735);
     text(canvas,"S: save | U: undistort preview | ESC/Q: quit",435,770);
@@ -404,142 +423,13 @@ cv::Mat dashboard(const cv::Mat& annotated, const Options& o, const std::vector<
     return canvas;
 }
 
-int run(const Options& o) {
-    const DartCongfig config(o.config.string());
-    const CameraParams& params = o.side == "left" ? config.leftCamera : config.rightCamera;
-    const CameraSide side = o.side == "left" ? CameraSide::Left : CameraSide::Right;
-    CameraStopSignals signals;
-    LatestCamera camera(params, side);
-    // Do not overwrite an existing session even if it appeared after option validation.
-    if (!fs::create_directories(o.output)) throw std::runtime_error("Cannot create a new output directory");
-    fs::create_directory(o.output / "frames");
-    std::cout << "Live calibration: " << o.side << " camera=" << params.deviceIp << " net=" << params.netIp
-              << " size=" << params.width << 'x' << params.height << " output=" << o.output << '\n'
-              << "Reading camera settings only; input.mode and old K/D do not constrain this calibration.\n";
-    cv::namedWindow(windowName,cv::WINDOW_NORMAL); cv::resizeWindow(windowName,1280,900);
-    auto data = cv::makePtr<calib::calibrationData>(); data->imageSize = {params.width,params.height};
-    calib::captureParameters capture; capture.board = calib::Chessboard; capture.boardSize = o.board;
-    capture.squareSize = o.squareMm; capture.templDst = 295; capture.captureDelay = 1; capture.fps = 1;
-    BackgroundDetector detector;
-    std::optional<DetectionResult> detection;
-    std::optional<CameraFrame> latest;
-    std::vector<Sample> samples;
-    Solution solved; solved.data = data; solved.flags = modelFlags(o.model);
-    std::future<Solution> pending;
-    std::uint64_t revision = 0, pendingRevision = 0, serial = 0, detectionEpoch = 0;
-    std::uint64_t previewSequence = 0, submittedSequence = 0;
-    std::uint64_t solvedRevision = std::numeric_limits<std::uint64_t>::max();
-    bool automatic = o.automatic, undistorted = false, captureRequested = false;
-    bool saved = false;
-    std::string status = "Waiting for a complete chessboard";
-    cv::Mat annotated;
-    std::vector<cv::Point2f> anchor;
-    auto stableSince = Clock::now(), lastFrameAt = Clock::now(), captureAfter = Clock::now();
-    auto launch = [&](cv::Mat raw = {}, std::string image = {}) {
-        const auto snapshot = samples; const auto size = data->imageSize;
-        const int flags = o.model == "auto" ? solved.flags : modelFlags(o.model);
-        pendingRevision = revision;
-        pending = std::async(std::launch::async,[o,size,snapshot,flags,raw,image] {
-            if (!raw.empty()) {
-                try {
-                    if (!cv::imwrite((o.output/image).string(),raw,{cv::IMWRITE_PNG_COMPRESSION,1}))
-                        throw FrameWriteError("Cannot save original camera frame");
-                } catch (const cv::Exception& e) { throw FrameWriteError(e.what()); }
-            }
-            return solve(o,size,snapshot,flags);
-        });
-    };
-    try {
-        while (!signals.stopRequested()) {
-            if (pending.valid() && pending.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
-                try {
-                    Solution completed = pending.get();
-                    if (pendingRevision == revision) {
-                        solved = std::move(completed); samples = solved.samples;
-                        solvedRevision = revision;
-                        data->cameraMatrix = solved.data->cameraMatrix; data->distCoeffs = solved.data->distCoeffs;
-                        status = data->cameraMatrix.empty() ? "Need at least 3 distinct views" : "Updated; move board to a new pose";
-                        if (!data->cameraMatrix.empty()) {
-                            calib::calibDataController report(solved.data,o.maxViews,0.1); report.printParametersToConsole(std::cout);
-                        }
-                    }
-                } catch (const FrameWriteError&) { throw; }
-                catch (const std::exception& e) { status = std::string("Solve failed: ")+e.what(); std::cerr << status << '\n'; }
-                anchor.clear(); ++detectionEpoch;
-            }
-            const bool busy = pending.valid();
-            if (auto frame = camera.take()) {
-                lastFrameAt = Clock::now(); latest = std::move(frame); ++previewSequence;
-                annotated = latest->image; // Read-only native frame; the worker draws on its own clone.
-            } else if (Clock::now()-lastFrameAt>std::chrono::seconds(5)) {
-                throw std::runtime_error("No camera frame for 5 seconds; check SDK connection/exposure");
-            }
-            if (auto result = detector.takeReady()) {
-                if (result->epoch == detectionEpoch) {
-                    const bool manual = captureRequested && result->receivedAt >= captureAfter;
-                    if (!result->found || busy) anchor.clear();
-                    else {
-                        const auto& points = result->points;
-                        const double threshold = 0.0006 * std::hypot(params.width,params.height);
-                        if (anchor.empty() || cornerMotion(points,anchor)>threshold) {
-                            anchor = points; stableSince = result->receivedAt;
-                        }
-                        const double held = std::chrono::duration<double>(result->receivedAt-stableSince).count();
-                        const bool novel = diverse(points,samples,data->imageSize);
-                        status = novel ? cv::format("Hold steady: %.1f / %.1f s",held,o.holdSeconds)
-                                       : "Already sampled this pose; move/tilt/resize the board";
-                        if ((manual || (automatic && held >= o.holdSeconds)) && novel) {
-                            if (result->angleOK) {
-                                const std::string image = cv::format("frames/frame_%06llu.png",static_cast<unsigned long long>(++serial));
-                                samples.push_back({points,image,result->frame.frame_id});
-                                ++revision; ++detectionEpoch; saved = false;
-                                launch(result->frame.image,image); status = "Saving original frame and updating calibration";
-                            } else status = "Rejected by official board-angle check; reduce tilt";
-                            anchor.clear();
-                        }
-                    }
-                    if (manual || busy) captureRequested = false;
-                    if (!result->found && !busy) status = "Complete chessboard not found";
-                }
-                detection = std::move(result);
-            }
-            if (latest && !detector.busy() && submittedSequence != previewSequence) {
-                DetectionJob job; job.frame = *latest; job.capture = capture;
-                job.cameraMatrix = data->cameraMatrix.clone(); job.distCoeffs = data->distCoeffs.clone();
-                job.receivedAt = lastFrameAt; job.epoch = detectionEpoch;
-                detector.submit(std::move(job)); submittedSequence = previewSequence;
-            }
-            cv::imshow(windowName,dashboard(annotated,o,samples,solved,pending.valid(),automatic,undistorted,status,
-                detection ? &*detection : nullptr,detector.busy(),latest ? latest->frame_id : 0));
-            const int key = cv::waitKey(1) & 0xff;
-            if (key==27 || key=='q' || cv::getWindowProperty(windowName,cv::WND_PROP_VISIBLE)==0) break;
-            if (key=='a') { automatic = !automatic; anchor.clear(); captureRequested = false; ++detectionEpoch; }
-            if (key=='u') undistorted = !undistorted;
-            if (key==' ') { captureRequested = !pending.valid(); captureAfter = Clock::now(); }
-            if (key=='s') {
-                if (pending.valid() || solvedRevision!=revision || data->cameraMatrix.empty()) status = "Wait for a valid updated solution before saving";
-                else { saveReport(o,solved); saved = true; status = "Saved intrinsics.yaml and source frames"; }
-            }
-            if ((key=='r' || key=='d') && !pending.valid()) {
-                if (key=='d') samples.clear(); else if (!samples.empty()) samples.pop_back();
-                ++revision; ++detectionEpoch; saved = false; anchor.clear(); captureRequested = false;
-                // Rebuild from retained observations; never show stale confidence after undo/clear.
-                solved = {}; solved.data = cv::makePtr<calib::calibrationData>(); solved.data->imageSize = data->imageSize;
-                solved.flags = modelFlags(o.model); data->cameraMatrix.release(); data->distCoeffs.release();
-                launch(); status = "Rebuilding retained sample set";
-            }
-        }
-        if (pending.valid()) { solved = pending.get(); samples = solved.samples; solvedRevision = revision; saved = false; }
-        if (!saved && solvedRevision==revision && solved.data && !solved.data->cameraMatrix.empty()) saveReport(o,solved);
-        cv::destroyWindow(windowName);
-    } catch (...) { cv::destroyWindow(windowName); throw; }
-    return 0;
-}
 } // namespace livecalib
+
+#include "monocular_workflow.hpp"
 
 #ifndef DART_CALIBRATION_NO_MAIN
 int main(int argc,char** argv) {
-    try { const auto options = livecalib::parseOptions(argc,argv); return options.side.empty()?0:livecalib::run(options); }
+    try { const auto options = livecalib::parseOptions(argc,argv); return options.side.empty()?0:(options.mode==livecalib::Options::Mode::Collect?livecalib::collect(options):livecalib::calibrate(options)); }
     catch (const std::exception& e) { std::cerr << "Calibration failed: " << e.what() << '\n'; return 1; }
 }
 #endif

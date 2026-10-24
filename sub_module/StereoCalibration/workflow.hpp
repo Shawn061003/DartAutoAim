@@ -46,8 +46,8 @@ inline Settings ParseSettings(int argc,char** argv) {
                  <<"Board: 11 columns x 8 rows INNER corners, 30 mm squares. Fixed K/D.\n"
                  <<"Bounds in RIGHT optical frame (right/down/forward): |Tx|=450..570, |Ty|<=60, |Tz|<=160 mm.\n"
                  <<"Collection: A=auto/pause, SPACE=save pair, ESC/Q=quit.\n"
-                 <<"Calibration: drag LMB=ROI, wheel=zoom, RMB=pan, SPACE=accept+next, N=skip, B=back, P=next,\n"
-                 <<"R=clear ROIs, D=remove from fit, F=reverse right corner order, U=undo, S=save, 0=reset zoom, ESC/Q=quit.\n";
+                 <<"Calibration: LMB=ROI, wheel=zoom, RMB click=zoom in, Shift+RMB=zoom out, RMB drag=pan, SPACE=accept+next, N=skip, B=back, P=next,\n"
+                 <<"R=clear ROIs, D=remove from fit, F=reverse right corner order, U=undo, S=save, 0=reset zoom, 1/2=L zoom, 3/4=R zoom, [/]=list scroll, ESC/Q=quit.\n";
         s.help=true;return s;
     }
     const std::vector<std::string> known{"collect","calibration","config","input","output","left-intrinsics","right-intrinsics","pair-ms","interval","min-pairs","max-pairs"};

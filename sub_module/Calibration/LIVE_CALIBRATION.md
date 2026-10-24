@@ -1,90 +1,111 @@
-# 实时单相机标定（demarcate）
+# 单目标定：采集 BMP 与离线框选 ROI
 
-`demarcate` 已从目录式离线标定替换为海康 SDK 实时标定。入口仍为 `sub_module/Calibration/demarcate.cpp`。
-复用 OpenCV 4.5.4 官方 interactive-calibration 的角点检测、对象点生成、角度检查、参数自动约束、质量评价和样本筛选；支撑源码与许可证在 `opencv_interactive_calibration/`。
+程序名仍为 `demarcate`，源码位于本目录。流程与双目标定一致：采集阶段只预览、定时抽帧保存，离线阶段人工框选完整棋盘，由 OpenCV 检测角点并求解内参。
 
-## 编译与启动
+## 编译与运行
 
-在上位机 Ubuntu / WSL Bash、仓库根目录运行：
+在仓库根目录运行：
 
 ```bash
 cmake --build build --target demarcate -j2
-./build/demarcate --side=left
-./build/demarcate --side=right
+# 左相机：先采集，再离线标定
+./build/demarcate --collect --side=left
+./build/demarcate --calibration --side=left
+# 右相机独立处理
+./build/demarcate --collect --side=right
+./build/demarcate --calibration --side=right
 ```
 
-默认读取源码目录的 `config/dart.yaml`。`--config=/absolute/path/dart.yaml` 可选择其它完整配置。
-`--side` 必须明确填写，只连接选定相机；`input.mode` 不决定标定程序的输入方式，无需修改为 camera。
-相机 IP、网口 IP、曝光、增益和尺寸来自所选 cameras 节点。旧 K/D、R/T 不作为标定约束；配置文件不会被覆盖。
-镜头焦距、对焦、采集尺寸和硬件偏移须与实际使用状态一致。SDK 当前要求 OffsetX/OffsetY 为零，并核对尺寸，发现不匹配会报错，不自动改硬件 ROI。
-关闭会占用同一相机的其它采集程序后运行。
+默认读取 `config/dart.yaml`。采集只打开 `--side` 指定的相机，读取其 IP、网口、曝光、增益和尺寸，不使用旧内参约束求解，也不受 `input.mode` 影响。
+离线模式不打开相机，也不需要读取相机配置；图片直接使用原始尺寸和坐标。
+镜头焦距、对焦、采集尺寸和硬件偏移应与实际使用一致。默认棋盘为 **11×8 内角点、30 mm 方格**，可用 `--cols=11 --rows=8 --square-mm=30` 修改。
 
-不依赖 YOLO / OpenVINO 的独立构建：
+依赖 MVS SDK、OpenCV 的 core/imgproc/imgcodecs/calib3d/highgui/aruco/**freetype** 模块。
+界面使用中文，程序自动查找 Noto CJK、文泉驿、Droid 中文字体或 WSL 下的 Windows 中文字体。
+若缺少字体，可安装 `fonts-noto-cjk`，或设置 `DART_CALIBRATION_FONT=/absolute/path/to/font.ttc`。保留 RMS、ROI、fx/fy 等缩写。
 
-```bash
-cmake -S . -B build/live-calibration \
-  -DDART_BUILD_MAIN=OFF -DDART_BUILD_YOLO=OFF \
-  -DDART_BUILD_HSV_TUNER=OFF -DDART_BUILD_CONTROL_DEMO=OFF \
-  -DDART_BUILD_CALIBRATION=ON -DBUILD_TESTING=ON
-cmake --build build/live-calibration --target demarcate -j2
-./build/live-calibration/demarcate --side=left
+## 采集
+
+默认图片路径相对于仓库根目录：
+
+```text
+sub_module/Calibration/Input/
+  left/000001.bmp
+  left/000002.bmp
+  left/dataset.yaml
+  right/000001.bmp
+  right/000002.bmp
+  right/dataset.yaml
 ```
 
-依赖：MVS SDK（默认 `/opt/MVS`）、OpenCV core/imgproc/imgcodecs/calib3d/highgui/aruco 和可用的图形会话。
-
-## 采样
-
-默认棋盘为 **11×8 内角点，方格边长 30 mm**。更换标定板时明确设置：
-
-```bash
-./build/demarcate --side=left --cols=11 --rows=8 --square-mm=30 --hold=0.8 --model=auto
-```
-
-自动模式要求完整棋盘在约 0.8 秒内保持稳定；重复姿态被跳过。移动到图像不同区域、改变板的距离和适度倾角，等待自动采样。
-第一次至少采集 3 个不同姿态后开始求解；默认质量评价至少 10 张，上限 30 张，超过时按官方误差/覆盖筛选并重新拟合。
-边移动边观察角点与覆盖图，**采样时要短暂停稳**。采集、棋盘检测、保存/求解分别在后台运行；检测同一时间只处理一帧，完成后选择最新帧，不积压旧图。后台求解时暂停接受新样本，预览和采集继续运行；实际刷新速度取决于上位机。
-主画面标有 `LIVE` 和当前帧号，持续显示最新画面；右下角小窗显示上一次检测的原始画面、角点及其帧号（不随 U 去畸变）。下方显示检测状态、上一轮检测耗时和检测帧距当前的时间。旧角点不会叠加到新的实时画面；保存的原图、角点和帧编号始终属于同一帧。
-角点在缩小图中搜索，再回到原分辨率做亚像素精修，保存原始像素坐标；显示缩放不会改变 K/D。
+`--input=/new/directory` 可指定当前单相机的图片文件夹。采集仅允许新的或空目录，拒绝覆盖已有数据；需要再录一组时指定新目录。
+保存原始分辨率、未标注 BMP，不另存视频。`dataset.yaml` 记录相机侧、原始尺寸、帧号及主机接收时间。
+默认每秒抽取一帧，`--interval=1` 调整间隔。采集不运行棋盘检测，不自动判断清晰度，请在保存时停稳标定板。
+写盘与取帧在后台运行，预览保持更新；只保留一个写盘任务，不积压旧帧。
 
 | 按键 | 功能 |
 |---|---|
-| Space | 请求检测按键后的新帧；该帧棋盘完整且姿态不重复时手动采样 |
-| A | 自动 / 手动采样切换 |
-| R | 撤销最近一个保留样本并重算（求解完成后可用） |
-| D | 清空当前样本并重置（求解完成后可用） |
-| S | 保存当前已更新的有效解 |
-| U | 切换预览去畸变，不改变检测坐标 |
-| Esc / Q / Ctrl+C / 关闭窗口 | 退出；等待已接受样本保存完成，正常退出时保存有效解 |
+| A | 自动保存 / 暂停 |
+| 空格 | 保存下一帧 |
+| Esc / Q / Ctrl+C / 关闭窗口 | 退出，等待已经启动的保存完成 |
 
-`--auto=false` 可从手动模式开始。`--min-views=10 --max-views=30` 调整保留数量。
+`--auto=false` 可从暂停状态开始。
 
-## 模型与质量
-
-- `--model=auto`（默认）：普通五项畸变模型起步，保留官方参数约束自动调整；实际 flags 会显示并记录。
-- `--model=full`：固定使用五项 Brown 畸变模型，不自动增加参数约束。
-- `--model=k1`：固定 k2、k3 和切向畸变为零，主点自由求解。
-- `--model=narrow`：在 k1 模型上再固定主点到图像中心，与旧程序的同名模型保持一致。
-
-界面显示原始分辨率下的 fx/fy/cx/cy、总体及最差单张 RMS、焦距约 95% 统计区间，以及官方样本数、RMS、置信度和覆盖评价。
-固定参数的标准差可能为零，这不意味着真实参数毫无误差。质量指示基于当前模型与观测，不能代替独立图片和实物距离验证。
-
-## 输出
-
-默认新建 `CalibrationResults/live_<side>_<timestamp>/`。`--output=/new/directory` 可指定新目录；已有目录会被拒绝。
-
-- `frames/frame_*.png`：已接受样本的未标注、原始分辨率图片。
-- `intrinsics.yaml`：原始尺寸、K、5×1 D、棋盘尺寸、模型/实际 flags、标准差、每张误差、保留样本的路径/角点/板位姿和质量检查状态。
-
-`camera_matrix`、`distortion_coefficients`、`image_width`、`image_height` 保持现有 `stereo_calibrate` 内参读取格式。
-撤销、清空和自动筛选不会删除已拍原图；`board_poses` 才是当前解实际使用的样本清单。
-只保存到本次会话目录，绝不自动写回 dart.yaml；双目外参仍需重新标定。
-
-## 验证
+## 离线框选与标定
 
 ```bash
-cmake --build build/live-calibration --target dart_live_calibration_test dart_camera_input_test -j2
-ctest --test-dir build/live-calibration -R '^(live_calibration|camera_input)$' --output-on-failure
+./build/demarcate --calibration --side=left --input=/path/to/BMPs
 ```
 
-回归检查不打开相机或窗口，覆盖后台阻塞时的非阻塞轮询、单任务无积压、结果帧身份/原图保持、异常传递、原分辨率角点恢复、重复姿态、已知投影的内参恢复、官方筛选后样本/误差对齐、自动/窄视场约束、边缘覆盖索引和输出格式。
-实机连接、现场画面刷新速度、采样角度门限和最终精度需在实际相机上验收。
+也可导入已有 BMP 文件夹。首次进入逐张框选，重新进入恢复 `annotations.yaml` 中的 ROI、角点和接受/跳过状态；文件修改后不沿用旧标注。
+
+1. 左键拖动框住完整棋盘，包含全部内角点，并留少量白边。
+2. 后台只在原始分辨率 ROI 内运行 `findChessboardCornersSB`，失败时尝试传统检测，再做亚像素精修；不进行全图搜索。
+3. 检查角点连线确实对应棋盘，按空格接受并下一张；不清晰、不完整的图片按 N 跳过。
+4. 至少接受 3 张后后台求解；增加、移除、重框图片后重新求解。默认质量评价至少 10 张，上限 30 张，用 `--min-views` 和 `--max-views` 调整。
+5. **左下角始终显示原始传感器坐标下的覆盖网格**。绿色只来自当前已纳入标定的图片角点；移除、重框或跳过已接受图片时立即重建覆盖图。未接受图片不计入覆盖。
+6. 右侧列出实际参与的图片和单张 RMS，并显示总体/最差 RMS、fx/fy/cx/cy、焦距统计区间及数量、置信度、覆盖评价。求解期间清空旧指标。
+
+| 操作 | 功能 |
+|---|---|
+| 左键拖动 | 框选完整棋盘 ROI |
+| 滚轮 | 以光标为中心放大 / 缩小；在列表上则滚动列表 |
+| 右键单击 / Shift+右键单击 | 以点击位置为中心放大 / 缩小 |
+| 右键拖动 | 平移放大后的图片 |
+| + / -、缩放按钮 | 放大 / 缩小；0 重置 |
+| [ / ]、列表按钮 | 列表上滚 / 下滚；不依赖滚轮 |
+| 空格 / N | 接受 / 跳过并下一张 |
+| B / P | 上一张 / 下一张，不改变状态 |
+| R / D | 清除 ROI / 将当前图片移出标定 |
+| U | 撤销本次操作中最近仍有效的一次接受 |
+| S | 后台保存当前有效解和界面截图 |
+| Esc / Q / Ctrl+C / 关闭窗口 | 保存标注，等待当前求解并保存有效结果 |
+
+GTK3 的滚轮方向、错误坐标和滚轮事件类型已作兼容处理。某些系统不传递完整滚轮事件时，可使用右键、按钮或键盘。
+缩放和平移只影响显示，ROI 及角点会还原到原图坐标；过期的后台检测或求解结果不进入当前图片/数据集。
+
+## 模型与输出
+
+- `--model=auto`（默认）：普通五项畸变模型起步，保留 OpenCV 官方参数约束自动调整。
+- `--model=full`：使用五项 Brown 畸变模型，不自动增加约束。
+- `--model=k1`：固定 k2、k3、切向畸变为零，主点自由求解。
+- `--model=narrow`：在 k1 模型上固定主点到图像中心。
+
+默认新建 `sub_module/Calibration/Results/<side>_<时间>/`，或用 `--output=/NEW/directory` 指定新目录。
+
+- 输入目录下 `annotations.yaml`：自动保存全部图片的 ROI、角点、选择状态及源文件校验信息。
+- 输出目录下 `intrinsics.yaml`：K、5×1 D、原始尺寸、棋盘参数、实际求解标志、标准差、单张 RMS、实际使用图片的路径/角点/板位姿和质量状态。
+- 输出目录下 `review.png`：保存时的中文界面，包含左下角覆盖图。
+
+源图片不会因跳过或移除而删除。`camera_matrix`、`distortion_coefficients`、`image_width`、`image_height` 保持双目标定内参输入格式，可通过双目程序的 `--left-intrinsics` / `--right-intrinsics` 读取。
+不自动写回 dart.yaml。RMS 和统计区间不能代替独立数据、实际距离验证。
+
+## 无相机检查
+
+```bash
+cmake --build build/live-calibration --target dart_monocular_workflow_test dart_live_calibration_test -j2
+ctest --test-dir build/live-calibration -R 'monocular_workflow|live_calibration' --output-on-failure
+```
+
+检查覆盖 BMP 原图保持、拒绝覆盖、原始 ROI 坐标、跳过时丢弃旧检测、标注恢复/失效、增删后的覆盖网格、已知内参恢复及报告格式，并直接调用鼠标处理函数检查右键、滚轮、平移和缩放。
+真实相机采集、桌面系统传递的鼠标事件和最终精度仍需实机验收。
