@@ -9,7 +9,7 @@
 namespace stereo_calibration {
 // X_right = R * X_left + T. T is expressed in the RIGHT optical frame: right/down/forward, mm.
 struct TranslationBounds {
-    cv::Vec3d center, halfWidth{60.,10.,80.};
+    cv::Vec3d center, halfWidth{60.,60.,160.};
     explicit TranslationBounds(double initialX) : center(initialX<0 ? -510. : 510.,0.,0.) {
         if (!std::isfinite(initialX) || std::abs(initialX)<1e-9)
             throw std::runtime_error("Initial Tx has no reliable sign for the translation bounds");

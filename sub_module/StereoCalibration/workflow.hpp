@@ -44,7 +44,7 @@ inline Settings ParseSettings(int argc,char** argv) {
         std::cout<<"./build/stereo_calibration --collect [--pair-ms=20 --interval=1]\n"
                  <<"./build/stereo_calibration --calibration [--input=/path/to/Input]\n"
                  <<"Board: 11 columns x 8 rows INNER corners, 30 mm squares. Fixed K/D.\n"
-                 <<"Bounds in RIGHT optical frame (right/down/forward): |Tx|=450..570, |Ty|<=10, |Tz|<=80 mm.\n"
+                 <<"Bounds in RIGHT optical frame (right/down/forward): |Tx|=450..570, |Ty|<=60, |Tz|<=160 mm.\n"
                  <<"Collection: A=auto/pause, SPACE=save pair, ESC/Q=quit.\n"
                  <<"Calibration: drag LMB=ROI, wheel=zoom, RMB=pan, SPACE=accept+next, N=skip, B=back, P=next,\n"
                  <<"R=clear ROIs, D=remove from fit, F=reverse right corner order, U=undo, S=save, 0=reset zoom, ESC/Q=quit.\n";

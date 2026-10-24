@@ -110,10 +110,15 @@ int main() {
         }
         for (const double sign : {-1.,1.}) {
             TranslationBounds bounds(sign*510.);
+            const cv::Mat expandedInterior=(cv::Mat_<double>(3,1)<<sign*510.,55.,150.);
+            const cv::Mat outsideY=(cv::Mat_<double>(3,1)<<sign*510.,61.,0.);
+            const cv::Mat outsideZ=(cv::Mat_<double>(3,1)<<sign*510.,0.,161.);
+            Check(bounds.contains(expandedInterior) && !bounds.contains(outsideY) && !bounds.contains(outsideZ),
+                  "Updated Y/Z translation limits do not accept/reject the intended millimeter ranges");
             for (const double extreme : {-1000.,1000.}) {
                 cv::Mat p=cv::Mat::zeros(6,1,CV_64F); p.rowRange(3,6).setTo(extreme);
                 const cv::Mat t=bounds.decode(p);
-                Check(bounds.contains(t) && t.at<double>(0)*sign>0 && std::abs(t.at<double>(1))<=10 && std::abs(t.at<double>(2))<=80,
+                Check(bounds.contains(t) && t.at<double>(0)*sign>0 && std::abs(t.at<double>(1))<=60 && std::abs(t.at<double>(2))<=160,
                       "Optical-axis translation bounds failed at an extreme optimizer parameter");
             }
         }
@@ -133,7 +138,7 @@ int main() {
         Check(positive.passed && positive.T.at<double>(0)>0 && cv::norm(positive.T-positiveT)<1 &&
               TranslationBounds(510).contains(positive.T),cv::format("Positive-X fit failed: Tx=%.3f error=%.3f rms=%.4f epi=%.4f converged=%d iterations=%d",positive.T.at<double>(0),cv::norm(positive.T-positiveT),positive.rms,positive.epiP95,positive.translationConstraint.converged,positive.translationConstraint.iterations));
         Solution outsideForSave;
-        for (const cv::Vec3d& outside : {cv::Vec3d(-650,-4,35),cv::Vec3d(-490,35,35),cv::Vec3d(-490,-4,160),cv::Vec3d(-800,120,300)}) {
+        for (const cv::Vec3d& outside : {cv::Vec3d(-650,-4,35),cv::Vec3d(-490,90,35),cv::Vec3d(-490,-4,240),cv::Vec3d(-800,120,300)}) {
             const cv::Mat actual=(cv::Mat_<double>(3,1)<<outside[0],outside[1],outside[2]);
             const auto constrained=Solve(Synthetic(left,right,R,actual,root),left,right,10);
             Check(!TranslationBounds(-510).contains(constrained.translationConstraint.initialT) &&

@@ -911,7 +911,7 @@ cv::Mat Dashboard(const Observation& observed,const Camera& left,const Camera& r
     Label(canvas,status.substr(0,155),15,730,{80,220,255});
     Label(canvas,"LEFT native corner coverage",15,759); Label(canvas,"RIGHT native corner coverage",435,759);
     Coverage(canvas,pairs,left,true,15,775); Coverage(canvas,pairs,right,false,435,775);
-    Label(canvas,"Fixed K/D; |Tx|=450..570, |Ty|<=10, |Tz|<=80 mm",830,790);
+    Label(canvas,"Fixed K/D; |Tx|=450..570, |Ty|<=60, |Tz|<=160 mm",830,790);
     if (!solved.T.empty()) {
         Label(canvas,"T mm: "+Number(solved.T.at<double>(0),2)+", "+Number(solved.T.at<double>(1),2)+", "+Number(solved.T.at<double>(2),2),830,914);
         Label(canvas,"Free RMS="+Number(solved.translationConstraint.initialRms)+"; bounded RMS="+Number(solved.rms)+
@@ -949,7 +949,7 @@ int Run(Options o) {
         <<"\nIntrinsics: "<<(o.leftIntrinsics.empty()?"dart.yaml:cameras.left":o.leftIntrinsics.string())<<" | "
         <<(o.rightIntrinsics.empty()?"dart.yaml:cameras.right":o.rightIntrinsics.string())
         <<"\nBoard: 11x8 INNER corners, 30 mm squares. Fixed K/D; no equal-focal constraint.\n"
-        <<"Translation bounds (right optical frame, mm): |Tx|=450..570 (initial sign), |Ty|<=10, |Tz|<=80.\n"
+        <<"Translation bounds (right optical frame, mm): |Tx|=450..570 (initial sign), |Ty|<=60, |Tz|<=160.\n"
         <<"Keep rig fixed, pause board for sampling. Receive-time pairing is NOT hardware exposure sync.\nOutput: "<<o.output<<'\n';
     cv::namedWindow(kWindow,cv::WINDOW_NORMAL); cv::resizeWindow(kWindow,1440,1020);
     Observation observed;
