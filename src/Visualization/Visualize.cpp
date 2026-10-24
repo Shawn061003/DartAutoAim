@@ -2,6 +2,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
+#include <filesystem>
+#include <opencv2/freetype.hpp>
 #include <opencv2/highgui.hpp>
 #include <opencv2/imgproc.hpp>
 #include <stdexcept>
@@ -16,15 +19,41 @@ constexpr int kInsetHeight = 144;
 constexpr int kLabelHeight = 24;
 const cv::Scalar kRed(0, 0, 255); // OpenCV 使用 BGR 顺序。
 const cv::Scalar kOrange(0, 170, 255);
-const cv::Scalar kText(235, 235, 235);
+const cv::Scalar kText(242, 235, 224);
+const cv::Scalar kMuted(155, 140, 120);
+const cv::Scalar kBackground(24, 17, 11);
+const cv::Scalar kSurface(39, 29, 20);
+const cv::Scalar kBorder(74, 57, 39);
+const cv::Scalar kAccent(224, 208, 70);
+
+cv::Ptr<cv::freetype::FreeType2> chineseFont()
+{
+    thread_local auto font = [] {
+        std::string path;
+        if (const char* configured = std::getenv("DART_VISUALIZATION_FONT")) {
+            path = configured;
+            if (!std::filesystem::is_regular_file(path))
+                throw std::runtime_error("DART_VISUALIZATION_FONT 指定的字体文件不存在");
+        } else {
+            for (const auto* candidate : {
+                "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+                "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+                "/mnt/c/Windows/Fonts/msyh.ttc", "C:/Windows/Fonts/msyh.ttc"}) {
+                if (std::filesystem::is_regular_file(candidate)) { path = candidate; break; }
+            }
+        }
+        if (path.empty()) throw std::runtime_error("缺少中文字体，请用 DART_VISUALIZATION_FONT 指定中文字体文件");
+        auto loaded = cv::freetype::createFreeType2();
+        loaded->loadFontData(path, 0);
+        return loaded;
+    }();
+    return font;
+}
 
 void label(cv::Mat& image, const std::string& text, cv::Point origin,
-           const cv::Scalar& color = kText)
+           const cv::Scalar& color = kText, int height = 16)
 {
-    cv::putText(image, text, origin, cv::FONT_HERSHEY_SIMPLEX, 0.45,
-                cv::Scalar(0, 0, 0), 3, cv::LINE_AA);
-    cv::putText(image, text, origin, cv::FONT_HERSHEY_SIMPLEX, 0.45,
-                color, 1, cv::LINE_AA);
+    chineseFont()->putText(image, text, origin, height, color, -1, cv::LINE_AA, true);
 }
 
 // 等比例缩放并居中；返回实际图像区域，所有标注使用该区域对应的坐标变换。
@@ -84,12 +113,12 @@ void drawTarget(cv::Mat& canvas, const GuideLightDetectVisualize::TargetVisualiz
 
 std::string targetLabel(const YOLOInferenceVisualize::TargetVisualize& target)
 {
-    return cv::format("conf=%.3f", target.confidence);
+    return cv::format("置信度 %.0f%%", target.confidence * 100.0);
 }
 
 std::string targetLabel(const GuideLightDetectVisualize::TargetVisualize& target)
 {
-    return target.success ? "SUCCESS" : "FAILED";
+    return target.success ? "已定位" : "未定位";
 }
 
 template <typename FrameVisualize>
@@ -99,11 +128,11 @@ cv::Mat drawPanel(const FrameVisualize& data, bool right)
     if (frame.image.empty() || frame.image.type() != CV_8UC3)
         throw std::invalid_argument("Visualize expects a non-empty CV_8UC3 BGR image");
 
-    cv::Mat panel(kHeaderHeight + kImageHeight, kPanelWidth, CV_8UC3, cv::Scalar(24, 24, 24));
-    label(panel, std::string(right ? "Right" : "Left") + "  frame="
-          + std::to_string(frame.frame_id) + "  time=" + std::to_string(frame.timestamp_ms)
-          + " ms", {10, 20});
-    label(panel, "ROI count: " + std::to_string(data.targets.size()), {10, 42});
+    cv::Mat panel(kHeaderHeight + kImageHeight, kPanelWidth, CV_8UC3, kBackground);
+    cv::rectangle(panel, {0, 0, kPanelWidth, kHeaderHeight}, kSurface, cv::FILLED);
+    cv::rectangle(panel, {0, 0, 3, kHeaderHeight}, kAccent, cv::FILLED);
+    label(panel, right ? "右相机" : "左相机", {16, 23}, kText, 19);
+    label(panel, "候选目标 " + std::to_string(data.targets.size()), {16, 44}, kMuted, 14);
 
     cv::Mat imageArea = panel(cv::Rect(0, kHeaderHeight, kPanelWidth, kImageHeight));
     auto destination = fitImage(frame.image, imageArea);
@@ -121,7 +150,7 @@ cv::Mat drawPanel(const FrameVisualize& data, bool right)
         }
     }
     if (data.targets.empty())
-        label(panel, "No ROI", {kPanelWidth / 2 - 25, kHeaderHeight + kImageHeight / 2});
+        label(panel, "未发现目标", {kPanelWidth / 2 - 50, kHeaderHeight + kImageHeight / 2}, kMuted, 20);
 
     // 当前 YOLO 每侧最多两项；放大图由上至下位于左画面左上角/右画面右上角。
     // 全图标注不限数量；超过可容纳数量时只省略额外预览，不隐去全图检测结果。
@@ -131,18 +160,18 @@ cv::Mat drawPanel(const FrameVisualize& data, bool right)
         const int x = right ? kPanelWidth - kInsetWidth - 8 : 8;
         const int y = kHeaderHeight + 8 + static_cast<int>(i) * (kInsetHeight + 8);
         cv::Mat inset = panel(cv::Rect(x, y, kInsetWidth, kInsetHeight));
-        inset.setTo(cv::Scalar(32, 32, 32));
+        inset.setTo(kSurface);
         label(inset, "#" + std::to_string(i) + " " + targetLabel(target), {5, 17});
         const auto roi = target.roi & fullImage;
         if (roi.empty()) {
-            label(inset, "Invalid ROI", {10, 65}, kOrange);
+            label(inset, "区域无效", {10, 65}, kOrange);
         } else {
             cv::Mat zoom = inset(cv::Rect(0, kLabelHeight, kInsetWidth,
                                          kInsetHeight - kLabelHeight));
             const auto zoomArea = fitImage(frame.image(roi), zoom);
             drawTarget(zoom, target, roi, zoomArea);
         }
-        cv::rectangle(inset, cv::Rect(0, 0, inset.cols, inset.rows), kText, 1);
+        cv::rectangle(inset, cv::Rect(0, 0, inset.cols, inset.rows), kBorder, 1);
     }
     return panel;
 }
@@ -152,7 +181,7 @@ cv::Mat drawStereo(const FrameVisualize& left, const FrameVisualize& right)
 {
     cv::Mat canvas;
     cv::hconcat(drawPanel(left, false), drawPanel(right, true), canvas);
-    cv::line(canvas, {kPanelWidth, 0}, {kPanelWidth, canvas.rows - 1}, kText, 1);
+    cv::line(canvas, {kPanelWidth, 0}, {kPanelWidth, canvas.rows - 1}, kBorder, 1);
     return canvas;
 }
 
@@ -181,7 +210,7 @@ cv::Mat YOLOInferenceVisualize::Draw(const FrameVisualize& left, const FrameVisu
 void YOLOInferenceVisualize::Show(const FrameVisualize& left, const FrameVisualize& right,
                                  int delay_ms)
 {
-    show("YOLO inference", Draw(left, right), delay_ms);
+    show("候选目标", Draw(left, right), delay_ms);
 }
 
 cv::Mat GuideLightDetectVisualize::Draw(const FrameVisualize& left, const FrameVisualize& right)
@@ -192,7 +221,7 @@ cv::Mat GuideLightDetectVisualize::Draw(const FrameVisualize& left, const FrameV
 void GuideLightDetectVisualize::Show(const FrameVisualize& left, const FrameVisualize& right,
                                     int delay_ms)
 {
-    show("Guide light detection", Draw(left, right), delay_ms);
+    show("引导灯检测", Draw(left, right), delay_ms);
 }
 
 cv::Mat DetectionVisualize::Draw(const YOLOInferenceVisualize::FrameVisualize& yoloLeft,
@@ -202,11 +231,11 @@ cv::Mat DetectionVisualize::Draw(const YOLOInferenceVisualize::FrameVisualize& y
 {
     auto yolo = YOLOInferenceVisualize::Draw(yoloLeft, yoloRight);
     auto guide = GuideLightDetectVisualize::Draw(guideLeft, guideRight);
-    label(yolo, "YOLO", {kPanelWidth - 80, 42});
-    label(guide, "GUIDE LIGHT", {kPanelWidth - 120, 42});
+    label(yolo, "目标识别", {kPanelWidth - 112, 32}, kAccent, 20);
+    label(guide, "引导灯定位", {kPanelWidth - 132, 32}, kAccent, 20);
     cv::Mat canvas;
     cv::vconcat(yolo, guide, canvas);
-    cv::line(canvas, {0, yolo.rows}, {canvas.cols - 1, yolo.rows}, kText, 1);
+    cv::line(canvas, {0, yolo.rows}, {canvas.cols - 1, yolo.rows}, kAccent, 1);
     return canvas;
 }
 
@@ -216,48 +245,32 @@ void DetectionVisualize::Show(const YOLOInferenceVisualize::FrameVisualize& yolo
                               const GuideLightDetectVisualize::FrameVisualize& guideRight,
                               int delay_ms)
 {
-    show("detection", Draw(yoloLeft, yoloRight, guideLeft, guideRight), delay_ms);
+    show("目标检测", Draw(yoloLeft, yoloRight, guideLeft, guideRight), delay_ms);
 }
 
 namespace {
-const cv::Scalar kMeasureText(55, 50, 40);
-const cv::Scalar kTargetGreen(50, 170, 45);
-const cv::Scalar kTargetName(175, 85, 30);
 constexpr double kGridMeters = 0.5;
 
 bool finitePosition(const cv::Point3d& point)
 {
-    return std::isfinite(point.x) && std::isfinite(point.y) && std::isfinite(point.z);
+    return std::isfinite(point.x) && std::isfinite(point.y) && std::isfinite(point.z)
+        && std::isfinite(std::hypot(point.x, point.y, point.z));
 }
 
-bool validTarget(const StereoscopicMeasurementVisualize::TargetVisualize& target)
-{
-    return finitePosition(target.position_m) && target.position_m.z > 0.0;
-}
-
-const char* targetName(StereoscopicMeasurementVisualize::TargetClassVisualize target)
+const char* targetName(StereoscopicMeasurementVisualize::TargetClassVisualize category)
 {
     using ClassVisualize = StereoscopicMeasurementVisualize::TargetClassVisualize;
-    switch (target) {
-    case ClassVisualize::BASE: return "BASE";
-    case ClassVisualize::OUTPOST: return "OUTPOST";
-    default: return "UNKNOWN";
+    switch (category) {
+    case ClassVisualize::BASE: return "基地";
+    case ClassVisualize::OUTPOST: return "前哨站";
+    default: return "未知目标";
     }
 }
 
-void measurementLabel(cv::Mat& image, const std::string& text, cv::Point origin,
-                      const cv::Scalar& color = kMeasureText, double scale = 0.45)
+cv::Scalar targetColor(StereoscopicMeasurementVisualize::TargetClassVisualize category)
 {
-    // 浅色描边使数值在网格和几何连线上仍可辨认。
-    cv::putText(image, text, origin, cv::FONT_HERSHEY_SIMPLEX, scale,
-                cv::Scalar(250, 250, 250), 3, cv::LINE_AA);
-    cv::putText(image, text, origin, cv::FONT_HERSHEY_SIMPLEX, scale,
-                color, 1, cv::LINE_AA);
-}
-
-std::string errorLabel(double error)
-{
-    return std::isfinite(error) && error >= 0.0 ? cv::format("%.3f px", error) : "N/A";
+    return category == StereoscopicMeasurementVisualize::TargetClassVisualize::OUTPOST
+        ? cv::Scalar(240, 155, 195) : kAccent;
 }
 
 cv::Point plotPoint(const cv::Point2d& point, const cv::Rect2d& domain, const cv::Rect& plot)
@@ -266,172 +279,166 @@ cv::Point plotPoint(const cv::Point2d& point, const cv::Rect2d& domain, const cv
             plot.y + plot.height - cvRound((point.y - domain.y) * plot.height / domain.height)};
 }
 
+void panel(cv::Mat& canvas, const cv::Rect& area)
+{
+    cv::rectangle(canvas, area, kSurface, cv::FILLED);
+    cv::rectangle(canvas, area, kBorder, 1);
+    cv::line(canvas, area.tl(), area.tl() + cv::Point(32, 0), kAccent, 2);
+    cv::line(canvas, area.tl(), area.tl() + cv::Point(0, 12), kAccent, 2);
+}
+
 void drawGrid(cv::Mat& canvas, const cv::Rect& plot, const cv::Rect2d& domain)
 {
-    cv::rectangle(canvas, plot, cv::Scalar(253, 253, 253), cv::FILLED);
-    // 网格始终为0.5m，不随缩放改成其他物理间隔；过小的格子停止绘制，避免无界循环。
+    cv::rectangle(canvas, plot, kBackground, cv::FILLED);
+    // 仍为0.5m等比例方格；过密时隐藏细网格，避免异常范围引起无界循环。
     if (kGridMeters * plot.width / domain.width >= 2.0) {
         for (double x = std::ceil(domain.x / kGridMeters) * kGridMeters;
              x < domain.x + domain.width; x += kGridMeters) {
             const int pixel = plotPoint({x, domain.y}, domain, plot).x;
+            const bool major = std::abs(x / 5.0 - std::round(x / 5.0)) < 1e-8;
             cv::line(canvas, {pixel, plot.y}, {pixel, plot.y + plot.height},
-                     cv::Scalar(224, 226, 228), 1);
+                     major ? kBorder : cv::Scalar(38, 29, 20), 1);
+            if (major && pixel > plot.x + 12 && pixel < plot.x + plot.width - 20)
+                label(canvas, cv::format("%.0f", x), {pixel - 7, plot.y + plot.height + 20}, kMuted, 13);
         }
         for (double y = std::ceil(domain.y / kGridMeters) * kGridMeters;
              y < domain.y + domain.height; y += kGridMeters) {
             const int pixel = plotPoint({domain.x, y}, domain, plot).y;
+            const bool major = std::abs(y / 5.0 - std::round(y / 5.0)) < 1e-8;
             cv::line(canvas, {plot.x, pixel}, {plot.x + plot.width, pixel},
-                     cv::Scalar(224, 226, 228), 1);
+                     major ? kBorder : cv::Scalar(38, 29, 20), 1);
+            if (major && pixel > plot.y + 14 && pixel < plot.y + plot.height - 10)
+                label(canvas, cv::format("%.0f", y), {plot.x + 5, pixel - 4}, kMuted, 13);
         }
-    } else {
-        measurementLabel(canvas, "0.5 m grid below display resolution", plot.tl() + cv::Point(8, 18));
     }
-    cv::rectangle(canvas, plot, cv::Scalar(160, 165, 170), 1);
+    cv::rectangle(canvas, plot, kBorder, 1);
 }
 
-void cameraLabel(cv::Mat& canvas, cv::Point camera, cv::Point text, const char* name)
+void drawOrigin(cv::Mat& canvas, const cv::Point& point)
 {
-    cv::line(canvas, camera, text + cv::Point(0, -5), cv::Scalar(120, 120, 120), 1, cv::LINE_AA);
-    measurementLabel(canvas, name, text, kRed);
+    cv::drawMarker(canvas, point, kText, cv::MARKER_CROSS, 12, 1, cv::LINE_AA);
+    cv::circle(canvas, point, 7, kText, 1, cv::LINE_AA);
+    label(canvas, "镖口", point + cv::Point(12, -10), kText, 16);
+}
+
+void drawTargetMarker(cv::Mat& canvas, cv::Point point,
+                      StereoscopicMeasurementVisualize::TargetClassVisualize category)
+{
+    const auto color = targetColor(category);
+    cv::circle(canvas, point, 12, color * 0.18, cv::FILLED, cv::LINE_AA);
+    cv::circle(canvas, point, 7, color, 1, cv::LINE_AA);
+    cv::circle(canvas, point, 3, color, cv::FILLED, cv::LINE_AA);
+    label(canvas, targetName(category), point + cv::Point(14, -12), color, 18);
 }
 } // namespace
 
 StereoscopicMeasurementVisualize::MetricsVisualize StereoscopicMeasurementVisualize::Metrics(
-    const cv::Point3d& position_m, const cv::Point3d& left_camera_m)
+    const cv::Point3d& position_m)
 {
-    if (!finitePosition(position_m) || position_m.z <= 0.0 || !finitePosition(left_camera_m))
-        throw std::invalid_argument("Measurement visualization requires finite positions and positive target depth");
-    return {std::hypot(position_m.x - left_camera_m.x / 2.0,
-                       position_m.z - left_camera_m.z / 2.0),
-            std::hypot(position_m.x, position_m.z), -position_m.y};
+    if (!finitePosition(position_m))
+        throw std::invalid_argument("位置可视化需要有限的镖口坐标");
+    return {std::hypot(position_m.x, position_m.y), position_m.z};
 }
 
 cv::Mat StereoscopicMeasurementVisualize::Draw(const FrameVisualize& data)
 {
-    if (!finitePosition(data.left_camera_m))
-        throw std::invalid_argument("Measurement visualization requires a finite left camera position");
-    cv::Mat canvas(800, 1280, CV_8UC3, cv::Scalar(245, 247, 249));
-    const cv::Rect topPlot(28, 238, 584, 482);
-    const cv::Rect sidePlot(668, 238, 584, 482);
-    const auto& left = data.left_camera_m;
-    const cv::Point3d midpoint = left * 0.5;
-    double xRadius = std::max(2.0, std::abs(left.x) + 1.0);
-    double zMin = std::min(-1.0, left.z - 1.0);
-    double zMax = std::max(27.0, left.z + 1.0);
-    double hMin = std::min(-1.0, -left.y - 1.0);
-    double hMax = std::max(3.0, -left.y + 1.0);
-    std::size_t invalid = 0;
-    for (const auto& target : data.targets) {
-        if (!validTarget(target)) { ++invalid; continue; }
-        const auto& p = target.position_m;
-        xRadius = std::max(xRadius, std::abs(p.x - midpoint.x) + 1.0);
-        zMax = std::max(zMax, p.z + 1.0);
-        hMin = std::min(hMin, -p.y - 1.0);
-        hMax = std::max(hMax, -p.y + 1.0);
+    cv::Mat canvas(800, 1280, CV_8UC3, kBackground);
+    label(canvas, "空间定位", {28, 47}, kText, 30);
+    label(canvas, "镖口坐标系", {172, 44}, kMuted, 18);
+    const auto validCount = std::count_if(data.targets.begin(), data.targets.end(), [](const auto& target) {
+        return finitePosition(target.position_m);
+    });
+    cv::circle(canvas, {1070, 36}, 4, validCount > 0 ? kAccent : kMuted, cv::FILLED);
+    label(canvas, validCount > 0 ? "已定位 " + std::to_string(validCount) + " 个目标" : "等待目标",
+          {1086, 43}, validCount > 0 ? kAccent : kMuted, 17);
+    cv::line(canvas, {24, 64}, {1256, 64}, kBorder, 1);
+
+    int cardX = 24;
+    for (const auto category : {TargetClassVisualize::BASE, TargetClassVisualize::OUTPOST}) {
+        const cv::Rect card(cardX, 84, 604, 132);
+        panel(canvas, card);
+        const auto color = targetColor(category);
+        label(canvas, targetName(category), {cardX + 18, 113}, color, 22);
+        const auto found = std::find_if(data.targets.begin(), data.targets.end(), [category](const auto& target) {
+            return target.target_class == category && finitePosition(target.position_m);
+        });
+        label(canvas, "水平距离", {cardX + 18, 143}, kMuted, 15);
+        label(canvas, "相对高度", {cardX + 234, 143}, kMuted, 15);
+        label(canvas, "横向偏移", {cardX + 428, 143}, kMuted, 15);
+        if (found != data.targets.end()) {
+            const auto metrics = Metrics(found->position_m);
+            label(canvas, cv::format("%.2f", metrics.horizontal_distance_m),
+                  {cardX + 18, 191}, kText, 36);
+            label(canvas, cv::format("%+.2f", metrics.height_m),
+                  {cardX + 234, 191}, kText, 32);
+            label(canvas, cv::format("%+.2f", found->position_m.x),
+                  {cardX + 428, 191}, kText, 32);
+        } else {
+            for (const int offset : {18, 234, 428})
+                label(canvas, "—", {cardX + offset, 188}, kMuted, 30);
+            label(canvas, "未发现", {cardX + 520, 111}, kMuted, 16);
+        }
+        cardX += 628;
     }
-    zMin = std::floor(zMin / kGridMeters) * kGridMeters;
-    zMax = std::ceil(zMax / kGridMeters) * kGridMeters;
-    // 两视图共用等比例尺，保证每格真实对应0.5m x 0.5m。
+
+    panel(canvas, {24, 240, 604, 520});
+    panel(canvas, {652, 240, 604, 520});
+    label(canvas, "俯视图", {44, 273}, kText, 21);
+    label(canvas, "侧视图", {672, 273}, kText, 21);
+    label(canvas, "前向 Y ↑", {487, 271}, kMuted, 16);
+    label(canvas, "高度 Z ↑", {1115, 271}, kMuted, 16);
+    const cv::Rect topPlot(48, 298, 556, 410);
+    const cv::Rect sidePlot(676, 298, 556, 410);
+
+    double xRadius = 2.0, yMin = -1.0, yMax = 27.0, zMin = -1.0, zMax = 3.0;
+    for (const auto& target : data.targets) {
+        if (!finitePosition(target.position_m)) continue;
+        const auto& p = target.position_m;
+        xRadius = std::max(xRadius, std::abs(p.x) + 2.0);
+        yMin = std::min(yMin, p.y - 2.0);
+        yMax = std::max(yMax, p.y + 2.0);
+        zMin = std::min(zMin, p.z - 2.0);
+        zMax = std::max(zMax, p.z + 2.0);
+    }
     const double scale = std::min({topPlot.width / (2.0 * xRadius),
-                                   topPlot.height / (zMax - zMin),
-                                   sidePlot.width / (zMax - zMin),
-                                   sidePlot.height / (hMax - hMin)});
+        topPlot.height / (yMax - yMin), sidePlot.width / (yMax - yMin),
+        sidePlot.height / (zMax - zMin)});
     if (!(scale > 0.0) || !std::isfinite(scale))
-        throw std::invalid_argument("Measurement visualization coordinate range is too large");
-    const cv::Rect2d topDomain(midpoint.x - topPlot.width / (2.0 * scale), zMin,
-                               topPlot.width / scale, topPlot.height / scale);
-    const cv::Rect2d sideDomain(zMin, hMin, sidePlot.width / scale, sidePlot.height / scale);
+        throw std::invalid_argument("位置可视化坐标范围过大");
+    const cv::Rect2d topDomain(-topPlot.width / (2.0 * scale), yMin,
+                              topPlot.width / scale, topPlot.height / scale);
+    const cv::Rect2d sideDomain(yMin, zMin, sidePlot.width / scale, sidePlot.height / scale);
     drawGrid(canvas, topPlot, topDomain);
     drawGrid(canvas, sidePlot, sideDomain);
-
-    measurementLabel(canvas, "TOP VIEW  X / Z", {28, 32}, kMeasureText, 0.65);
-    measurementLabel(canvas, "SIDE VIEW  Z / -Y", {668, 32}, kMeasureText, 0.65);
-    measurementLabel(canvas, "Frames L=" + std::to_string(data.left_frame_id)
-        + " R=" + std::to_string(data.right_frame_id), {28, 56});
-    measurementLabel(canvas, "Right camera coordinates | units: m", {668, 56});
-    measurementLabel(canvas, "Reprojection error (undistorted pixels)", {28, 84});
-    cv::rectangle(canvas, {24, 94, 592, 98}, cv::Scalar(255, 255, 255), cv::FILLED);
-    cv::rectangle(canvas, {24, 94, 592, 98}, cv::Scalar(200, 200, 200), 1);
-    using ClassVisualize = TargetClassVisualize;
-    int row = 0;
-    for (const auto category : {ClassVisualize::BASE, ClassVisualize::OUTPOST}) {
-        const auto it = std::find_if(data.targets.begin(), data.targets.end(), [category](const auto& t) {
-            return validTarget(t) && t.target_class == category;
-        });
-        const int y = 115 + row * 43;
-        if (it == data.targets.end()) {
-            measurementLabel(canvas, std::string(targetName(category)) + ": not detected", {34, y});
-        } else {
-            const auto metrics = Metrics(it->position_m, left);
-            measurementLabel(canvas, std::string(targetName(category)) + "  L: "
-                + errorLabel(it->left_reprojection_error_px) + "  R: "
-                + errorLabel(it->right_reprojection_error_px), {34, y});
-            measurementLabel(canvas, cv::format("L0=%.3f m   L1=%.3f m   dH=%+.3f m",
-                metrics.l0_m, metrics.l1_m, metrics.delta_h_m), {34, y + 19});
-        }
-        ++row;
-    }
-    measurementLabel(canvas, "L0: XZ distance to stereo midpoint", {668, 88});
-    measurementLabel(canvas, "L1: XZ distance to right camera", {668, 111});
-    measurementLabel(canvas, "dH = -Y: above right camera is positive", {668, 134});
-    measurementLabel(canvas, "Red: cameras   Green: targets", {668, 157});
-    measurementLabel(canvas, cv::format("Baseline: %.3f m   Grid: 0.5 m x 0.5 m", cv::norm(left)), {668, 180});
-    measurementLabel(canvas, "Z forward (up) / X right", {28, 220});
-    measurementLabel(canvas, "Z forward (right) / height up", {668, 220});
-
-    const auto leftTop = plotPoint({left.x, left.z}, topDomain, topPlot);
-    const auto rightTop = plotPoint({0, 0}, topDomain, topPlot);
-    const auto midTop = plotPoint({midpoint.x, midpoint.z}, topDomain, topPlot);
-    const auto leftSide = plotPoint({left.z, -left.y}, sideDomain, sidePlot);
-    const auto rightSide = plotPoint({0, 0}, sideDomain, sidePlot);
-    cv::line(canvas, leftTop, rightTop, cv::Scalar(100, 100, 100), 2, cv::LINE_AA);
-    const int baselineY = rightSide.y;
-    cv::line(canvas, {sidePlot.x, baselineY}, {sidePlot.x + sidePlot.width, baselineY},
-             cv::Scalar(140, 140, 140), 1, cv::LINE_AA);
-
+    const auto topOrigin = plotPoint({0, 0}, topDomain, topPlot);
+    const auto sideOrigin = plotPoint({0, 0}, sideDomain, sidePlot);
+    cv::line(canvas, {topOrigin.x, topPlot.y}, {topOrigin.x, topPlot.y + topPlot.height}, kBorder, 1);
+    cv::line(canvas, {sidePlot.x, sideOrigin.y}, {sidePlot.x + sidePlot.width, sideOrigin.y}, kBorder, 1);
     for (const auto& target : data.targets) {
-        if (!validTarget(target)) continue;
+        if (!finitePosition(target.position_m)) continue;
         const auto& p = target.position_m;
-        const auto metrics = Metrics(p, left);
-        const auto top = plotPoint({p.x, p.z}, topDomain, topPlot);
-        const auto side = plotPoint({p.z, -p.y}, sideDomain, sidePlot);
-        const auto foot = plotPoint({p.z, 0}, sideDomain, sidePlot);
-        cv::line(canvas, midTop, top, cv::Scalar(155, 155, 155), 1, cv::LINE_AA);
-        cv::line(canvas, rightTop, top, cv::Scalar(90, 90, 90), 1, cv::LINE_AA);
-        const auto middle = (midTop + top) * 0.5;
-        measurementLabel(canvas, cv::format("L0 %.3f m", metrics.l0_m), middle + cv::Point(-132, -4));
-        measurementLabel(canvas, cv::format("L1 %.3f m", metrics.l1_m), middle + cv::Point(16, 18));
-        cv::line(canvas, side, foot, cv::Scalar(100, 100, 100), 1, cv::LINE_AA);
-        // 两端短横线表示高度尺寸，即使高度为0也保留数值标签。
-        for (const auto& endpoint : {side, foot})
-            cv::line(canvas, endpoint + cv::Point(-4, 0), endpoint + cv::Point(4, 0), kMeasureText, 1);
-        const int heightLabelX = std::clamp(side.x + 12, sidePlot.x + 4, sidePlot.x + sidePlot.width - 135);
-        measurementLabel(canvas, cv::format("dH %+.3f m", metrics.delta_h_m),
-                          {heightLabelX, (side.y + foot.y) / 2 + 18});
-        for (const auto& point : {top, side}) {
-            cv::circle(canvas, point, 6, kTargetGreen, cv::FILLED, cv::LINE_AA);
-            measurementLabel(canvas, targetName(target.target_class), point + cv::Point(10, -10), kTargetName);
-        }
+        const auto top = plotPoint({p.x, p.y}, topDomain, topPlot);
+        const auto side = plotPoint({p.y, p.z}, sideDomain, sidePlot);
+        const auto foot = plotPoint({p.y, 0}, sideDomain, sidePlot);
+        const auto color = targetColor(target.target_class);
+        cv::line(canvas, topOrigin, top, color * 0.45, 1, cv::LINE_AA);
+        cv::line(canvas, sideOrigin, side, color * 0.45, 1, cv::LINE_AA);
+        cv::line(canvas, side, foot, color * 0.65, 1, cv::LINE_AA);
+        drawTargetMarker(canvas, top, target.target_class);
+        drawTargetMarker(canvas, side, target.target_class);
     }
-    cv::circle(canvas, leftTop, 4, kRed, cv::FILLED, cv::LINE_AA);
-    cv::circle(canvas, rightTop, 4, kRed, cv::FILLED, cv::LINE_AA);
-    // 侧视图中两个光心可能几乎重合，左侧用空心圆、右侧用实心圆。
-    cv::circle(canvas, leftSide, 8, kRed, 2, cv::LINE_AA);
-    cv::circle(canvas, rightSide, 4, kRed, cv::FILLED, cv::LINE_AA);
-    cameraLabel(canvas, leftTop, {topPlot.x + 118, 750}, "Left camera");
-    cameraLabel(canvas, rightTop, {topPlot.x + 350, 750}, "Right camera");
-    cameraLabel(canvas, leftSide, {sidePlot.x + 20, 750}, "Left (hollow)");
-    cameraLabel(canvas, rightSide, {sidePlot.x + 205, 750}, "Right (filled)");
-    measurementLabel(canvas, "Grid: 0.5 m x 0.5 m | equal axis scale", {28, 785});
-    if (data.targets.empty() || invalid == data.targets.size())
-        measurementLabel(canvas, "No valid measurement", {668, 785}, kTargetName);
-    else if (invalid > 0)
-        measurementLabel(canvas, "Invalid targets skipped: " + std::to_string(invalid), {668, 785});
-    cv::line(canvas, {640, 0}, {640, canvas.rows - 1}, cv::Scalar(170, 175, 180), 1);
+    drawOrigin(canvas, topOrigin);
+    drawOrigin(canvas, sideOrigin);
+    label(canvas, "横向 X →", {487, 745}, kMuted, 16);
+    label(canvas, "前向 Y →", {1115, 745}, kMuted, 16);
+    label(canvas, "单位：米  ·  网格：0.5 米", {28, 786}, kMuted, 15);
+    const auto invalidCount = data.targets.size() - static_cast<std::size_t>(validCount);
+    if (invalidCount > 0)
+        label(canvas, "无效坐标已忽略", {1100, 786}, kOrange, 15);
     return canvas;
 }
 
 void StereoscopicMeasurementVisualize::Show(const FrameVisualize& data, int delay_ms)
 {
-    show("measurement", Draw(data), delay_ms);
+    show("空间定位", Draw(data), delay_ms);
 }

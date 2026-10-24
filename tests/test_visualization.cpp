@@ -79,39 +79,45 @@ int main(int argc, char* argv[])
         require(red(combined, 400, 532 + 372), "Combined bottom panel lost guide-light center");
         require(cv::norm(leftImage, originalLeft, cv::NORM_INF) == 0, "Combined drawing modified input");
 
-        // 三四五三角形验证L0取双目中点，且L0/L1均不包含高度分量。
-        const auto metrics = StereoscopicMeasurementVisualize::Metrics({2, -4, 5}, {-2, 0, 2});
-        require(std::abs(metrics.l0_m - 5.0) < 1e-12, "L0 must use the stereo midpoint in XZ");
-        require(std::abs(metrics.l1_m - std::sqrt(29.0)) < 1e-12, "L1 must use right-camera XZ distance");
-        require(metrics.delta_h_m == 4.0, "Height above right camera must be positive");
-        require(StereoscopicMeasurementVisualize::Metrics({2, 4, 5}, {-2, 0, 2}).delta_h_m == -4.0,
-                "Height below right camera must be negative");
+        // 镖口坐标的XY水平距离与Z高度分离，不再使用相机XZ平面或反转Y。
+        const auto metrics = StereoscopicMeasurementVisualize::Metrics({3, 4, -2});
+        require(metrics.horizontal_distance_m == 5.0, "Horizontal distance must use dart XY");
+        require(metrics.height_m == -2.0, "Height must preserve dart Z sign");
+        require(StereoscopicMeasurementVisualize::Metrics({3, -4, 2}).horizontal_distance_m == 5.0,
+                "Negative forward coordinates must remain valid");
+        require(StereoscopicMeasurementVisualize::Metrics({0, 0, 0}).height_m == 0.0,
+                "Dart origin must remain valid");
         StereoscopicMeasurementVisualize::FrameVisualize scene;
-        scene.left_camera_m = {-0.488, -0.0028, 0.0393};
-        scene.left_frame_id = 10;
-        scene.right_frame_id = 11;
         using ClassVisualize = StereoscopicMeasurementVisualize::TargetClassVisualize;
-        scene.targets.push_back({{0.4, -1.2, 24.4}, ClassVisualize::BASE, 0.12, 0.18});
-        scene.targets.push_back({{-0.2, -0.5, 15.2}, ClassVisualize::OUTPOST, 0.08, 0.11});
+        scene.targets.push_back({{0.4, 24.4, 1.2}, ClassVisualize::BASE});
+        scene.targets.push_back({{-0.2, 15.2, 0.5}, ClassVisualize::OUTPOST});
         const auto measurement = StereoscopicMeasurementVisualize::Draw(scene);
         require(measurement.size() == cv::Size(1280, 800), "Unexpected measurement panel size");
-        cv::Mat greenPixels;
-        cv::inRange(measurement, cv::Scalar(45, 160, 40), cv::Scalar(55, 180, 50), greenPixels);
-        require(cv::countNonZero(greenPixels) > 0, "Measurement did not draw target markers");
+        // 当前范围内0.5m方格等比例缩放：检验XY与YZ两图的实际目标中心。
+        require(measurement.at<cv::Vec3b>(336, 332) == cv::Vec3b(224, 208, 70),
+                "Top view did not map dart XY correctly");
+        require(measurement.at<cv::Vec3b>(668, 1048) == cv::Vec3b(224, 208, 70),
+                "Side view did not map dart YZ correctly");
         if (argc > 1) {
             require(cv::imwrite(std::string(argv[1]) + ".detection.png", combined), "Could not save detection preview");
             require(cv::imwrite(std::string(argv[1]) + ".measurement.png", measurement), "Could not save measurement preview");
         }
         scene.targets.clear();
-        auto blank = StereoscopicMeasurementVisualize::Draw(scene);
-        cv::inRange(blank, cv::Scalar(45, 160, 40), cv::Scalar(55, 180, 50), greenPixels);
-        require(cv::countNonZero(greenPixels) == 0, "Empty measurement retained stale target markers");
+        const auto blank = StereoscopicMeasurementVisualize::Draw(scene);
+        const cv::Rect charts(24, 240, 1232, 520);
+        require(cv::norm(blank(charts), measurement(charts), cv::NORM_INF) > 0,
+                "Empty measurement retained stale target markers");
         scene.targets.push_back({{std::numeric_limits<double>::quiet_NaN(), 0, 10}, ClassVisualize::BASE});
-        blank = StereoscopicMeasurementVisualize::Draw(scene);
-        cv::inRange(blank, cv::Scalar(45, 160, 40), cv::Scalar(55, 180, 50), greenPixels);
-        require(cv::countNonZero(greenPixels) == 0, "Invalid measurement drew a target marker");
-        scene.targets = {{{0, 0, 5}, ClassVisualize::OUTPOST}};
-        StereoscopicMeasurementVisualize::Draw(scene); // 零高度、缺失误差显示N/A。
+        const auto invalid = StereoscopicMeasurementVisualize::Draw(scene);
+        require(cv::norm(blank(charts), invalid(charts), cv::NORM_INF) == 0,
+                "Invalid measurement drew a target marker");
+        bool invalidMetrics = false;
+        try { StereoscopicMeasurementVisualize::Metrics(scene.targets[0].position_m); }
+        catch (const std::invalid_argument&) { invalidMetrics = true; }
+        require(invalidMetrics, "NaN coordinates must be rejected by metrics");
+        scene.targets = {{{3, -4, -2}, ClassVisualize::OUTPOST}};
+        require(cv::norm(blank(charts), StereoscopicMeasurementVisualize::Draw(scene)(charts), cv::NORM_INF) > 0,
+                "Negative dart coordinates were hidden");
         yoloLeft.frame.image.release();
         bool rejected = false;
         try { YOLOInferenceVisualize::Draw(yoloLeft, yoloRight); }

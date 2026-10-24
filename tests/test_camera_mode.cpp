@@ -112,10 +112,7 @@ void StereoscopicMeasurementVisualize::Show(const FrameVisualize& data, int dela
     ++measurementShows;
     require(delayMs > 0, "Continuous measurement visualization must not block");
     require(guideShows == measurementShows, "Measurement shown before detection");
-    require(data.left_frame_id == 2 && data.right_frame_id == 9, "Measurement lost frame metadata");
     require(data.targets.empty(), "Failed/empty detections created a false measurement");
-    require(data.left_camera_m.x < 0 && cv::norm(data.left_camera_m) < 1.0,
-            "Left camera has wrong coordinate frame or unit");
 }
 
 int main(int argc, char** argv)
@@ -123,7 +120,7 @@ int main(int argc, char** argv)
     try {
         require(argc == 2, "Expected config path");
         DartCongfig config(argv[1]);
-        // 用已知3D点生成左右畸变像素，检查误差由测距器传出，并正确转换到显示接口。
+        // 已知3D点经过测距、镖口坐标转换，再送入独立显示接口。
         const cv::Point3d expectedRight(500, -800, 24000);
         const cv::Matx33d rotation = config.stereoscopicmeasurement.R;
         const cv::Vec3d translation = config.stereoscopicmeasurement.T;
@@ -149,18 +146,17 @@ int main(int argc, char** argv)
                 "Triangulated coordinates changed");
         require(measured[0].leftReprojectionErrorPx < 0.01 && measured[0].rightReprojectionErrorPx < 0.01,
                 "Measurement reprojection errors missing or inconsistent");
-        StereoFrame sampleFrame;
-        sampleFrame.left.frame_id = 17;
-        sampleFrame.right.frame_id = 18;
-        const auto visual = makeMeasurementVisualize(sampleFrame, config.stereoscopicmeasurement.T, measured);
-        require(cv::norm(visual.targets[0].position_m - expectedRight * 0.001) < 0.001,
-                "Measurement adapter failed millimeter-to-meter conversion");
-        require(cv::norm(visual.left_camera_m - cv::Point3d(translation) * 0.001) < 1e-12,
-                "Measurement adapter used the wrong camera transform");
-        require(visual.targets[0].target_class == StereoscopicMeasurementVisualize::TargetClassVisualize::BASE
-                && visual.targets[0].left_reprojection_error_px == measured[0].leftReprojectionErrorPx
-                && visual.targets[0].right_reprojection_error_px == measured[0].rightReprojectionErrorPx,
-                "Measurement adapter lost target class or reprojection errors");
+        const cv::Mat dartRotation = (cv::Mat_<double>(3, 3) << 1, 0, 0, 0, 0, 1, 0, -1, 0);
+        const cv::Mat dartTranslation = (cv::Mat_<double>(3, 1) << 240, -18.83, 231.45);
+        const LocationTransform locationtransform(dartRotation, dartTranslation);
+        const auto locations = locationtransform.RunTransform(measured);
+        const auto visual = makeLocationVisualize(locations);
+        require(visual.targets.size() == 1, "Location adapter lost target");
+        require(cv::norm(visual.targets[0].position_m - cv::Point3d(0.740, 23.98117, 1.03145)) < 0.001,
+                "Visualization must use transformed dart coordinates in meters");
+        require(visual.targets[0].target_class == StereoscopicMeasurementVisualize::TargetClassVisualize::BASE,
+                "Location adapter lost target class");
+        require(makeLocationVisualize({}).targets.empty(), "Empty locations created a stale target");
         config.frameQueue.capacity = 4;
         config.frameQueue.maxTimestampDiffMs = 5;
         const auto oldHandler = std::signal(SIGINT, priorSignalHandler);

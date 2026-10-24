@@ -58,7 +58,7 @@ target_compile_features(dart_mcu_protocol INTERFACE cxx_std_17)
 
 # 主程序与差分调参工具共用配置、图片采集及可视化模块。
 if(DART_BUILD_MAIN OR DART_BUILD_CALIBRATION OR (DART_BUILD_HSV_TUNER AND DART_BUILD_YOLO))
-    find_package(OpenCV REQUIRED COMPONENTS core imgcodecs imgproc highgui)
+    find_package(OpenCV REQUIRED COMPONENTS core imgcodecs imgproc highgui freetype)
     find_package(Threads REQUIRED)
 
     # 配置模块提供 dart::config 别名，供调用方通过 target_link_libraries 引用。
@@ -119,7 +119,7 @@ if(DART_BUILD_MAIN OR DART_BUILD_CALIBRATION OR (DART_BUILD_HSV_TUNER AND DART_B
     target_include_directories(dart_visualization PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/include ${OpenCV_INCLUDE_DIRS}
     )
-    target_link_libraries(dart_visualization PUBLIC opencv_core PRIVATE opencv_imgproc opencv_highgui)
+    target_link_libraries(dart_visualization PUBLIC opencv_core PRIVATE opencv_imgproc opencv_highgui opencv_freetype)
     target_compile_options(dart_visualization PRIVATE -Wall -Wextra -Wpedantic)
 
 endif()

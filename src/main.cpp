@@ -64,25 +64,17 @@ GuideLightDetectVisualize::FrameVisualize makeGuideLightVisualize(
     return data;
 }
 
-StereoscopicMeasurementVisualize::FrameVisualize makeMeasurementVisualize(
-    const StereoFrame& frame, const cv::Mat& leftToRightTmm,
-    const std::vector<StereoscopicMeasurement::StereoscopicMeasurementResult>& results)
+StereoscopicMeasurementVisualize::FrameVisualize makeLocationVisualize(
+    const std::vector<LocationTransform::LocationTransformResult>& locations)
 {
     StereoscopicMeasurementVisualize::FrameVisualize data;
-    // 测距输出以右光心为原点；左光心在此坐标系的位置是T，不是-R^T*T。
-    data.left_camera_m = {leftToRightTmm.at<double>(0, 0) / 1000.0,
-                          leftToRightTmm.at<double>(1, 0) / 1000.0,
-                          leftToRightTmm.at<double>(2, 0) / 1000.0};
-    data.left_frame_id = frame.left.frame_id;
-    data.right_frame_id = frame.right.frame_id;
-    data.targets.reserve(results.size());
+    data.targets.reserve(locations.size());
     using ClassVisualize = StereoscopicMeasurementVisualize::TargetClassVisualize;
-    for (const auto& result : results) {
+    for (const auto& result : locations) {
         auto category = ClassVisualize::UNKNOWN;
         if (result.TargetName == TargetClasses::BASE) category = ClassVisualize::BASE;
         else if (result.TargetName == TargetClasses::OUTPOST) category = ClassVisualize::OUTPOST;
-        data.targets.push_back({result.RealLocation * 0.001, category,
-            result.leftReprojectionErrorPx, result.rightReprojectionErrorPx});
+        data.targets.push_back({result.RealLocation * 0.001, category});
     }
     return data;
 }
@@ -121,14 +113,16 @@ int runImageMode(const DartCongfig& config)
     GuideLightDetect guideLight(config.guideLight);
     StereoscopicMeasurement measurement(config.leftCamera, config.rightCamera,
         config.stereoscopicmeasurement.R, config.stereoscopicmeasurement.T);
+    LocationTransform locationtransform(config.locationTransform.R, config.locationTransform.T);
 
     const auto detections = processFrame(*frame, yolo, guideLight);
     std::cout << "Visual detection completed: left_frame=" << frame->left.frame_id
               << " right_frame=" << frame->right.frame_id << '\n';
     const auto measurements = measurement.RunMeasurement(detections);
+    const auto locations = locationtransform.RunTransform(measurements);
     // 两个窗口均创建后再等待按键；GTK3 关闭全部窗口也可结束图片模式。
     StereoscopicMeasurementVisualize::Show(
-        makeMeasurementVisualize(*frame, config.stereoscopicmeasurement.T, measurements), 0);
+        makeLocationVisualize(locations), 0);
     return 0;
 }
 
@@ -164,9 +158,10 @@ int runCameraMode(const DartCongfig& config)
         const auto measurements = stereoscopicmeasurement.RunMeasurement(detections);
         // 6. 坐标转换。
         const auto locations = locationtransform.RunTransform(measurements);
+        StereoscopicMeasurementVisualize::Show(makeLocationVisualize(locations), 1);
     }
 
-    // 6. 正常退出显式停止；初始化或检测抛异常时由 CameraInput 析构完成同样清理。
+    // 7. 正常退出显式停止；初始化或检测抛异常时由 CameraInput 析构完成同样清理。
     input.StopCamera();
     std::cout << "Camera perception stopped.\n";
     return 0;
