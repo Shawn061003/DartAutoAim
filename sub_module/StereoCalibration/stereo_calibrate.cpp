@@ -6,7 +6,7 @@
 // 输出目录必须不存在。退出码：0=通过基本质量检查，2=已保存诊断结果但质量不合格，1=程序错误。
 // 采集前提：相机之间的位姿固定，且每对左右图中的棋盘必须保持同一位姿。
 #include <opencv2/opencv.hpp>
-#include "stereo_translation_constraint.hpp"
+#include "stereo_core.hpp"
 #include "Acquisition/AcquireFrame.h"
 #include "Acquisition/CameraInput.h"
 #include "Acquisition/Quit.h"
@@ -35,9 +35,6 @@
 
 namespace fs = std::filesystem;
 namespace stereo_calibration {
-constexpr int kColumns = 11, kRows = 8;
-constexpr float kSquareMm = 30.F;
-const cv::Size kFrameSize(1440, 1080);
 struct Group {
     std::string label;
     cv::Point2f leftOffset;
@@ -59,7 +56,7 @@ constexpr int kReferenceRowHeight = 1180; // 校正图 + 原图，便于核查�
 void Require(bool ok, const std::string& message) {
     if (!ok) throw std::runtime_error(message);
 }
-struct Camera { cv::Mat K, D; cv::Size referenceSize; };
+
 Camera ReadCamera(const fs::path& path) {
     cv::FileStorage file(path.string(), cv::FileStorage::READ);
     Require(file.isOpened(), "Cannot read camera parameters: " + path.string());
@@ -167,21 +164,14 @@ bool Detect(const cv::Mat& image, std::vector<cv::Point2f>& points, bool realtim
     }
     return found && points.size() == kColumns * kRows;
 }
-struct Pair {
-    std::size_t group;
-    int number;
-    fs::path leftPath, rightPath;
-    std::vector<cv::Point2f> left, right; // 左全幅参考坐标 / 右原图坐标。
-    bool rightReversed = false;
-    double epipolarRms = 0;
-};
+
 struct Rectification { cv::Mat leftK, R1, R2, P1, P2, Q; };
 double Quantile(std::vector<double> values, double q) {
     Require(!values.empty(), "No error samples");
     std::sort(values.begin(), values.end());
     return values[static_cast<std::size_t>(std::ceil(q * (values.size()-1)))];
 }
-std::string Number(double v, int digits=3) {
+std::string Number(double v, int digits) {
     std::ostringstream s; s << std::fixed << std::setprecision(digits) << v; return s.str();
 }
 
@@ -514,14 +504,7 @@ int OfflineMain(int argc, char** argv) {
 namespace stereo_live {
 using Clock = std::chrono::steady_clock;
 constexpr const char* kWindow = "Live stereo calibration - native coordinates";
-struct Options {
-    fs::path config = fs::path(DART_PROJECT_ROOT)/"config/dart.yaml", output;
-    fs::path leftIntrinsics, rightIntrinsics;
-    double holdSeconds = 0.8;
-    int minPairs = 10, maxPairs = 30;
-    std::int64_t pairMs = -1;
-    bool automatic = true, help = false;
-};
+
 Options Parse(int argc, char** argv) {
     cv::CommandLineParser parser(argc,argv,
         "{help | | Show live/offline usage without opening cameras}"
@@ -640,11 +623,7 @@ Observation Observe(StereoFrame frame) {
     if(result.leftFound && result.rightFound) result.rightReversed=AlignRight(result.left,result.right);
     return result;
 }
-struct LivePair {
-    Pair pair;
-    std::uint64_t leftId=0,rightId=0;
-    std::int64_t leftTime=0,rightTime=0;
-};
+
 
 double Motion(const std::vector<cv::Point2f>& a,const std::vector<cv::Point2f>& b) {
     if(a.size()!=b.size() || a.empty()) return std::numeric_limits<double>::infinity();
@@ -687,10 +666,7 @@ public:
     }
 };
 
-struct Epipolar {
-    double rms=0,p95=0,maximum=0;
-    std::vector<double> maxSide;
-};
+
 Epipolar MeasureEpipolar(const std::vector<cv::Point2f>& leftPoints,const std::vector<cv::Point2f>& rightPoints,
                         const Camera& left,const Camera& right,const cv::Mat& fundamental) {
     Require(!leftPoints.empty() && leftPoints.size()==rightPoints.size(),"Missing corresponding points");
@@ -713,14 +689,7 @@ Epipolar MeasureEpipolar(const std::vector<cv::Point2f>& leftPoints,const std::v
     result.rms=std::sqrt(sum/(2*ul.size())); result.p95=Quantile(result.maxSide,.95);
     result.maximum=*std::max_element(result.maxSide.begin(),result.maxSide.end()); return result;
 }
-struct Solution {
-    std::vector<LivePair> pairs;
-    cv::Mat R,T,E,F,errors;
-    std::vector<Epipolar> perPair;
-    double rms=std::numeric_limits<double>::quiet_NaN(),epiRms=0,epiP95=0,epiMax=0;
-    bool passed=false;
-    TranslationConstraintReport translationConstraint;
-};
+
 Solution Solve(std::vector<LivePair> pairs,const Camera& left,const Camera& right,int minimumPairs) {
     Solution result; result.pairs=std::move(pairs); if(result.pairs.size()<3) return result;
     std::vector<cv::Point3f> board;
@@ -786,7 +755,7 @@ void Save(const Options& o,const Camera& left,const Camera& right,const Solution
     Require(yaml.isOpened(),"Cannot write stereo report");
     yaml<<"status"<<(s.passed?"passes_basic_checks_not_distance_validated":"needs_recapture_or_investigation")
         <<"quality_passed"<<static_cast<int>(s.passed)<<"distance_validated"<<0
-        <<"capture_mode"<<"sdk_live_native_full_frames"<<"rectification_parameters_available"<<0
+        <<"capture_mode"<<o.captureMode<<"rectification_parameters_available"<<0
         <<"transform_convention"<<"X_right_mm = R * X_left_mm + T_mm"<<"camera_axes"<<"x_right,y_down,z_forward"
         <<"intrinsics_policy"<<"CALIB_FIX_INTRINSIC"<<"config_source"<<fs::absolute(o.config).string()
         <<"left_intrinsics_source"<<(o.leftIntrinsics.empty()?"dart.yaml:cameras.left":fs::absolute(o.leftIntrinsics).string())
@@ -814,7 +783,8 @@ void Save(const Options& o,const Camera& left,const Camera& right,const Solution
         yaml<<"{"<<"number"<<p.pair.number<<"left_image"<<p.pair.leftPath.string()<<"right_image"<<p.pair.rightPath.string()
             <<"left_frame_id"<<std::to_string(p.leftId)<<"right_frame_id"<<std::to_string(p.rightId)
             <<"left_receive_timestamp_ms"<<std::to_string(p.leftTime)<<"right_receive_timestamp_ms"<<std::to_string(p.rightTime)
-            <<"host_timestamp_diff_ms"<<static_cast<int>(TimestampDifference(p.leftTime,p.rightTime))
+            <<"frame_timestamps_available"<<static_cast<int>(p.timestampsKnown)
+            <<"host_timestamp_diff_ms"<<(p.timestampsKnown?static_cast<int>(TimestampDifference(p.leftTime,p.rightTime)):-1)
             <<"left_offset_x"<<0<<"left_offset_y"<<0<<"right_offset_x"<<0<<"right_offset_y"<<0
             <<"right_corner_order_reversed"<<static_cast<int>(p.pair.rightReversed)
             <<"image_points_left_reference"<<p.pair.left<<"image_points_right"<<p.pair.right

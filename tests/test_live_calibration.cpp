@@ -1,6 +1,6 @@
 // Headless regression checks: real chessboard detection, official filtering, solve and stereo-compatible export.
 #define DART_CALIBRATION_NO_MAIN
-#include "../sub_module/demarcate.cpp"
+#include "../sub_module/Calibration/demarcate.cpp"
 
 namespace {
 void require(bool condition, const std::string& message) {

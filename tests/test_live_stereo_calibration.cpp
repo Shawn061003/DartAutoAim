@@ -1,6 +1,6 @@
 // No SDK devices or GUI windows: mixed-resolution geometry, pairing gate, output and live dashboard.
 #define DART_STEREO_CALIBRATION_NO_MAIN
-#include "../sub_module/stereo_calibrate.cpp"
+#include "../sub_module/StereoCalibration/stereo_calibrate.cpp"
 
 namespace {
 void Check(bool ok,const std::string& message) { if(!ok) throw std::runtime_error(message); }

@@ -1,6 +1,6 @@
 # 实时单相机标定（demarcate）
 
-`demarcate` 已从目录式离线标定替换为海康 SDK 实时标定。入口仍为 `sub_module/demarcate.cpp`。
+`demarcate` 已从目录式离线标定替换为海康 SDK 实时标定。入口仍为 `sub_module/Calibration/demarcate.cpp`。
 复用 OpenCV 4.5.4 官方 interactive-calibration 的角点检测、对象点生成、角度检查、参数自动约束、质量评价和样本筛选；支撑源码与许可证在 `opencv_interactive_calibration/`。
 
 ## 编译与启动
