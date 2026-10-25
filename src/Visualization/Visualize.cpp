@@ -187,9 +187,11 @@ cv::Mat drawStereo(const FrameVisualize& left, const FrameVisualize& right)
 
 int show(const char* title, const cv::Mat& canvas, int delay_ms, bool closeOnKey = true)
 {
-    if (delay_ms < 0) throw std::invalid_argument("Visualize delay_ms must be >= 0");
+    if (delay_ms < -1) throw std::invalid_argument("Visualize delay_ms must be >= -1");
     cv::namedWindow(title, cv::WINDOW_NORMAL);
     cv::imshow(title, canvas);
+    // -1 只提交画面，由同一主线程中的另一个显示入口处理窗口事件。
+    if (delay_ms == -1) return -1;
     if (delay_ms > 0) {
         return cv::waitKey(delay_ms);
     }

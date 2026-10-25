@@ -7,6 +7,14 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <atomic>
+#include <chrono>
+#include <functional>
+#include <mutex>
+#include <optional>
+#include <string>
+#include <thread>
+#include <vector>
 
 namespace dart_mcu {
 
@@ -19,7 +27,7 @@ namespace dart_mcu {
 //   2       协议版本，固定 0x03
 //   3       有效载荷长度，固定 20（十六进制 0x14）
 //   4..7    开火许可 int32_t：0 禁止，1 允许
-//   8..15   yaw 角度偏差 double：单位 rad，左正右负
+//   8..15   yaw 角度偏差 double：单位 rad，右正左负
 //   16..23  目标伸缩量 double：单位 mm，相对标定零点的绝对目标，拉紧为正
 //   24      CRC8：校验偏移 0..23 的全部 24 字节
 // 帧尾仅包含 CRC8，没有额外的结束标志。
@@ -55,7 +63,7 @@ static_assert(sizeof(double) == 8 &&
 
 struct Command {
     std::int32_t fire_allowed = 0; // 开火许可：0 禁止，1 允许；实际开火指令由人工下达
-    double yaw_error_rad = 0.0;    // 目标相对当前的角度偏差，单位 rad，左正右负
+    double yaw_error_rad = 0.0;    // 目标相对当前的角度偏差，单位 rad，右正左负
     double stretch_target_mm = 0.0; // 相对标定零点的绝对目标伸缩量，单位 mm，拉紧为正
 };
 
@@ -213,4 +221,72 @@ inline bool decode(const std::uint8_t* data, std::size_t size,
     output.is_stationary = static_cast<std::int32_t>(state);
     return true;
 }
+
+// 最近一次通过校验的状态及本地接收时间。
+// sequence 是当前 start 会话内的接收计数，用于观察更新；不参与线上的协议，
+// 也不代表调整任务编号。received_at 使用上位机单调时钟。
+struct ReceivedStatus {
+    Status status{};
+    std::chrono::steady_clock::time_point received_at{};
+    std::uint64_t sequence = 0;
+};
+
+// Linux 串口收发模块：后台循环接收，调用 send 时发送一帧。
+// 不扫描设备，由调用方传入 /dev/serial/by-id/... 等已确定的路径。
+class Communication {
+public:
+    using StatusCallback = std::function<void(const ReceivedStatus&)>;
+    using DiagnosticCallback = std::function<void(const std::string&)>;
+
+    Communication() = default;
+    ~Communication();
+    Communication(const Communication&) = delete;
+    Communication& operator=(const Communication&) = delete;
+
+    // 打开串口并启动接收线程；默认 115200、8N1、关闭流控。
+    // 打开、配置或线程启动失败会抛出异常并释放资源。
+    // 已运行时重复 start 会报错；停止或故障后可显式重新 start。
+    // 回调在接收线程执行，应快速返回；可读取状态或调用 send，
+    // 请在外部线程调用 start/stop，且不得从回调销毁本对象。
+    // 不在模块中安装信号处理器，也不自动发送、重发或重连。
+    void start(const std::string& port, int baud = 115200,
+               StatusCallback on_status = {},
+               DiagnosticCallback on_diagnostic = {});
+    void stop();
+    bool isRunning() const noexcept;
+
+    // 按需发送一个 25 字节命令帧，支持并发调用，整帧串行写出。
+    // timeout 限制取得发送锁后的串口写出时间；短写继续写剩余部分。
+    // 成功表示本地完整写入。无效参数或发送失败抛出异常。
+    // I/O 错误或超时会使本会话失效，防止半帧之后追加新的控制帧。
+    void send(const Command& command,
+              std::chrono::milliseconds timeout = std::chrono::milliseconds(1000));
+
+    // 返回不超过 max_age 的最新有效状态；尚未收到、超时、停止或故障时为空。
+    // max_age 由业务根据回传周期明确设置，不能为负数。
+    // 接收时间只能帮助判断本地数据年龄，无法关联某次调整任务。
+    std::optional<ReceivedStatus> latestStatus(std::chrono::milliseconds max_age) const;
+    std::string lastError() const;
+
+private:
+    void loop();
+    void receiveOnce();
+    void parseBuffer();
+    void fail(const std::string& message);
+    void stopLocked(); // 调用方持有生命周期锁；先结束线程，再关闭描述符。
+
+    int fd_ = -1;
+    std::atomic<bool> running_{false};
+    std::thread receiver_;
+    std::mutex lifecycle_mutex_;
+    std::mutex send_mutex_;
+    mutable std::mutex state_mutex_;
+    std::optional<ReceivedStatus> latest_status_;
+    std::string last_error_;
+    std::uint64_t receive_sequence_ = 0;
+    std::vector<std::uint8_t> receive_buffer_; // 仅接收线程使用。
+    StatusCallback on_status_;
+    DiagnosticCallback on_diagnostic_;
+};
+
 } // 命名空间 dart_mcu

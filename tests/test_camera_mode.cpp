@@ -4,6 +4,10 @@
 #undef main
 
 #include <csignal>
+#include <cstdlib>
+#include <fcntl.h>
+#include <poll.h>
+#include <unistd.h>
 #include <opencv2/calib3d.hpp>
 
 namespace {
@@ -11,6 +15,9 @@ int yoloLoads = 0, yoloCalls = 0, detectionCalls = 0, stopCalls = 0, yoloShows =
 int measurementShows = 0;
 int detectionKey = -1, measurementKey = -1;
 bool active = false, failStart = false, failDetection = false, emptyResults = false;
+bool controlRun = false;
+StereoFrameQueue* controlQueue = nullptr;
+GuideLightDetect::StereoDetectResult controlDetections;
 
 void require(bool condition, const char* message)
 {
@@ -24,8 +31,127 @@ void reset()
     active = failStart = failDetection = emptyResults = false;
 }
 void priorSignalHandler(int) {}
-}
 
+// 使用伪终端模拟电控，只验证主程序的状态门控与下发内容，不访问真实设备。
+class ControlMcu {
+public:
+    ControlMcu()
+    {
+        master_ = ::posix_openpt(O_RDWR | O_NOCTTY | O_NONBLOCK | O_CLOEXEC);
+        require(master_ >= 0, "Cannot open control PTY");
+        if (::grantpt(master_) != 0 || ::unlockpt(master_) != 0) {
+            ::close(master_);
+            throw std::runtime_error("Cannot initialize control PTY");
+        }
+        char name[256]{};
+        if (::ptsname_r(master_, name, sizeof(name)) != 0) {
+            ::close(master_);
+            throw std::runtime_error("Cannot get control PTY name");
+        }
+        port = name;
+    }
+    ~ControlMcu() { if (master_ >= 0) ::close(master_); }
+    void disconnect() { ::close(master_); master_ = -1; }
+
+    template<class Predicate>
+    static void waitFor(Predicate predicate)
+    {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (!predicate()) {
+            require(std::chrono::steady_clock::now() < deadline, "Control status wait timed out");
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    }
+
+    void publish(bool stationary)
+    {
+        const auto previous = communication->latestStatus(std::chrono::seconds(10));
+        const auto sequence = previous ? previous->sequence : 0;
+        const dart_mcu::ReceiveFrame status = stationary
+            ? dart_mcu::ReceiveFrame{0x42,0x52,3,4,1,0,0,0,0x9D}
+            : dart_mcu::ReceiveFrame{0x42,0x52,3,4,0,0,0,0,0x12};
+        require(::write(master_, status.data(), status.size()) ==
+                static_cast<ssize_t>(status.size()), "Cannot publish control status");
+        waitFor([&] {
+            const auto next = communication->latestStatus(std::chrono::seconds(10));
+            return next && next->sequence > sequence;
+        });
+    }
+    bool hasCommand()
+    {
+        pollfd descriptor{master_, POLLIN, 0};
+        return ::poll(&descriptor, 1, 10) > 0 && (descriptor.revents & POLLIN);
+    }
+    void expectCommand(double yaw)
+    {
+        dart_mcu::Frame frame{};
+        std::size_t count = 0;
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (count < frame.size()) {
+            require(std::chrono::steady_clock::now() < deadline, "Control command wait timed out");
+            pollfd descriptor{master_, POLLIN, 0};
+            if (::poll(&descriptor, 1, 20) <= 0) continue;
+            const auto received = ::read(master_, frame.data() + count, frame.size() - count);
+            require(received > 0, "Cannot read control command");
+            count += static_cast<std::size_t>(received);
+        }
+        dart_mcu::Command command;
+        require(dart_mcu::decode_command(frame.data(), frame.size(), command), "Invalid control command");
+        require(command.fire_allowed == 0 && command.stretch_target_mm == 0,
+                "Aim command changed fire/stretch fields");
+        require(std::abs(command.yaw_error_rad - yaw) < 1e-12, "Control yaw value/sign changed");
+        require(!hasCommand(), "One request produced duplicate commands");
+    }
+    std::string port;
+private:
+    int master_ = -1;
+};
+
+void testAimControl()
+{
+    ControlMcu mcu;
+    communicationParams = CommunicationParams{};
+    communication = std::make_unique<dart_mcu::Communication>();
+    communication->start(mcu.port, communicationParams.baud);
+    aim_base = true;
+    requestedAim.reset();
+    preAimPending = false;
+    lastCommandStatusSequence = aimRevision = 0;
+    lastCommandAt = {};
+
+    handleAimModeKey('1');
+    require(preAimPending && !mcu.hasCommand(), "Unknown status allowed pre-aim");
+    mcu.publish(false);
+    handleAimModeKey(-1);
+    require(preAimPending && !mcu.hasCommand(), "Moving state allowed pre-aim");
+    handleAimModeKey('2');
+    handleAimModeKey('1');
+    handleAimModeKey('2');
+    require(!aim_base && !mcu.hasCommand(), "Pending target did not keep latest selection");
+    mcu.publish(true);
+    handleAimModeKey(-1);
+    mcu.expectCommand(0.17);
+    require(!preAimPending, "Queued pre-aim was not cleared");
+    handleAimModeKey('2');
+    require(!preAimPending && !mcu.hasCommand(), "Repeated mode key reissued command");
+    handleAimModeKey('1');
+    require(preAimPending && !mcu.hasCommand(), "One status authorized two commands");
+    mcu.publish(true);
+    std::this_thread::sleep_for(std::chrono::milliseconds(communicationParams.statusMaxAgeMs + 20));
+    handleAimModeKey(-1);
+    require(preAimPending && !mcu.hasCommand(), "Expired status allowed pre-aim");
+    mcu.publish(true);
+    handleAimModeKey(-1);
+    mcu.expectCommand(0.26);
+
+    mcu.disconnect();
+    ControlMcu::waitFor([&] { return !communication->isRunning(); });
+    require(!communication->latestStatus(std::chrono::seconds(1)), "Disconnected status remained valid");
+    communication.reset();
+    requestedAim.reset();
+    preAimPending = false;
+}
+}
 CameraDevice::CameraDevice(const CameraParams& params, CameraSide side)
     : params_(params), side_(side) {}
 CameraDevice::~CameraDevice() noexcept = default;
@@ -43,11 +169,15 @@ void CameraInput::StartCamera()
     if (failStart) throw std::runtime_error("injected startup failure");
     CameraFrame left{cv::Mat(8, 8, CV_8UC3, cv::Scalar(0, 0, 0)), 1, 0, CameraSide::Left};
     CameraFrame right{left.image, 9, 100, CameraSide::Right};
+    if (controlRun)
+        right.timestamp_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
     queue_->push(left, right);
     // 第一次 GetFrame 丢弃旧左帧并返回 nullopt；下一次应取得这张新左帧。
     left.frame_id = 2;
-    left.timestamp_ms = 100;
+    left.timestamp_ms = right.timestamp_ms;
     queue_->pushLeft(left);
+    controlQueue = queue_.get();
 }
 void CameraInput::StopCamera() noexcept { ++stopCalls; active = false; }
 
@@ -78,7 +208,8 @@ GuideLightDetect::StereoDetectResult GuideLightDetect::RunDetection(
         require(rois.left.at(0).frame_id == left.frame_id && rois.right.at(0).frame_id == right.frame_id,
                 "YOLO results were not forwarded to traditional vision");
     // 用真实退出信号验证本次检测完成后正常退出；FAILED 和空集合均不能阻碍退出。
-    std::raise(SIGINT);
+    if (!controlRun || detectionCalls == 2) std::raise(SIGINT);
+    if (controlRun) return controlDetections;
     StereoDetectResult result;
     if (!emptyResults) {
         GuideLightDetectResult failed;
@@ -103,19 +234,36 @@ int DetectionVisualize::Show(const YOLOInferenceVisualize::FrameVisualize& yoloL
     require(detectionCalls == guideShows, "Guide-light visualization ran before detection");
     require(left.frame.frame_id == 2 && right.frame.frame_id == 9,
             "Guide-light visualization received mismatched frames");
-    require(left.targets.size() == (emptyResults ? 0u : 1u) && right.targets.empty(),
-            "Guide-light visualization lost empty/failed results");
-    if (!emptyResults)
-        require(!left.targets.front().success, "Failed detection displayed as successful");
+    if (controlRun) {
+        require(left.targets.size() == 1 && right.targets.size() == 1 &&
+                left.targets.front().success && right.targets.front().success,
+                "Successful control detections lost");
+    } else {
+        require(left.targets.size() == (emptyResults ? 0u : 1u) && right.targets.empty(),
+                "Guide-light visualization lost empty/failed results");
+        if (!emptyResults)
+            require(!left.targets.front().success, "Failed detection displayed as successful");
+    }
     return detectionKey;
 }
 
 int StereoscopicMeasurementVisualize::Show(const FrameVisualize& data, int delayMs)
 {
     ++measurementShows;
-    require(delayMs > 0, "Continuous measurement visualization must not block");
+    require(delayMs == -1, "Measurement visualization must not read keyboard input");
     require(guideShows == measurementShows, "Measurement shown before detection");
-    require(data.targets.empty(), "Failed/empty detections created a false measurement");
+    if (controlRun) {
+        require(data.targets.size() == 1, "Control target was not measured");
+        if (measurementShows == 1) {
+            const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count();
+            CameraFrame left{cv::Mat(8, 8, CV_8UC3, cv::Scalar(0, 0, 0)), 2, now, CameraSide::Left};
+            CameraFrame right{left.image, 9, now, CameraSide::Right};
+            controlQueue->push(left, right);
+        }
+    } else {
+        require(data.targets.empty(), "Failed/empty detections created a false measurement");
+    }
     return measurementKey;
 }
 
@@ -123,6 +271,8 @@ int main(int argc, char** argv)
 {
     try {
         require(argc == 2, "Expected config path");
+        testAimControl();
+        require(communication == nullptr && !preAimPending, "Control session leaked state");
         DartCongfig config(argv[1]);
         aim_base = true;
         require(!handleAimModeKey(-1) && aim_base, "No key changed aim mode");
@@ -166,18 +316,42 @@ int main(int argc, char** argv)
         require(visual.targets[0].target_class == StereoscopicMeasurementVisualize::TargetClassVisualize::BASE,
                 "Location adapter lost target class");
         require(makeLocationVisualize({}).targets.empty(), "Empty locations created a stale target");
+        // 真实运行主循环的 yaw 发送分支，比较当前目标求解值和电控实际收到的命令。
+        controlDetections = synthetic;
+        const LocationTransform actualTransform(config.locationTransform.R, config.locationTransform.T);
+        const auto expectedYaw = YawSolver{}.RunSolve(actualTransform.RunTransform(measured), true);
+        require(expectedYaw.has_value(), "Synthetic control yaw missing");
+        for (const bool stationary : {false, true}) {
+            reset();
+            controlRun = true;
+            ControlMcu mcu;
+            communicationParams = config.communication;
+            communication = std::make_unique<dart_mcu::Communication>();
+            communication->start(mcu.port, communicationParams.baud);
+            requestedAim.reset();
+            preAimPending = false;
+            aim_base = true;
+            aimRevision = lastCommandStatusSequence = 0;
+            lastCommandAt = {};
+            mcu.publish(stationary);
+            require(runCameraMode(config) == 0, "Control camera run failed");
+            if (stationary) mcu.expectCommand(*expectedYaw);
+            else require(!mcu.hasCommand(), "Moving status allowed yaw command");
+            communication.reset();
+            controlRun = false;
+        }
         config.frameQueue.capacity = 4;
         config.frameQueue.maxTimestampDiffMs = 5;
         const auto oldHandler = std::signal(SIGINT, priorSignalHandler);
         for (bool empty : {false, true}) {
             reset();
             emptyResults = empty;
-            // 两个显示入口均可能消费按键，最终选择应遵循收到按键的先后顺序。
+            // 目标切换只接受 processFrame 的键值，位置显示的返回值不影响选择。
             aim_base = empty;
             detectionKey = empty ? '2' : '1';
             measurementKey = empty ? '1' : '2';
             require(runCameraMode(config) == 0, "Camera mode did not stop normally");
-            require(aim_base == empty, "Visualization key did not update aim mode");
+            require(aim_base == !empty, "Target switching did not stay in processFrame");
             require(yoloLoads == 1 && yoloCalls == 1 && detectionCalls == 1 && yoloShows == 1 && guideShows == 1
                     && measurementShows == 1,
                     "Perception/visualization not completed once");
@@ -200,6 +374,7 @@ int main(int argc, char** argv)
         std::cout << "Camera mode pairing, perception, signal exit and cleanup: PASS\n";
         return 0;
     } catch (const std::exception& error) {
+        communication.reset();
         std::cerr << error.what() << '\n';
         return 1;
     }

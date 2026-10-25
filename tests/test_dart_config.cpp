@@ -93,8 +93,15 @@ int main(int argc, char** argv)
         image = replace(image, "left_diff_lower: 0.", "left_diff_lower: 12.5");
         image = replace(image, "right_diff_upper: 255.", "right_diff_upper: 200.");
         image = replace(image, "left_diff_upper: 255.", "left_diff_upper: 180.");
+        image = std::regex_replace(image, std::regex(R"rx(port:\s*"[^"]*")rx"), "port: \"/dev/pts/config-test\"");
+        image = replace(image, "baud: 115200", "baud: 230400");
+        image = replace(image, "status_max_age_ms: 200", "status_max_age_ms: 75");
+        image = replace(image, "write_timeout_ms: 100", "write_timeout_ms: 40");
         write(image);
         config.load(fixture.string());
+        require(config.communication.port == "/dev/pts/config-test" &&
+                config.communication.baud == 230400 && config.communication.statusMaxAgeMs == 75 &&
+                config.communication.writeTimeoutMs == 40, "Communication options were ignored");
         require(config.input.mode == InputMode::Image &&
                 config.input.leftPath == (dir / "left.png").string(), "Image mode/path incorrect");
         require(config.yolo.modelPath == (dir / "../weights/GuideLightDetect.onnx").lexically_normal().string(),
@@ -127,6 +134,15 @@ int main(int argc, char** argv)
             {"mode: \"image\"", "mode: \"images\""},
             {"left_path: \"left.png\"", "left_path: \"\""},
             {"capacity: 7", "capacity: 0"},
+            {"baud: 230400", "baud: 12345"},
+            {"baud: 230400", "baud: 0"},
+            {"baud: 230400", "baud: 115200.5"},
+            {"status_max_age_ms: 75", "status_max_age_ms: 0"},
+            {"status_max_age_ms: 75", "status_max_age_ms: -1"},
+            {"write_timeout_ms: 40", "write_timeout_ms: 0"},
+            {"write_timeout_ms: 40", "write_timeout_ms: .Nan"},
+            {"port: \"/dev/pts/config-test\"", "port: 123"},
+            {"communication:", "missing_communication:"},
             {"capacity: 7", "capacity: -1"},
             {"mode: \"image\"", "mode: \"unknown\""},
             {"max_timestamp_diff_ms: 0", "max_timestamp_diff_ms: -1"},
@@ -160,6 +176,9 @@ int main(int argc, char** argv)
                         "Missing configuration path in diagnostic");
             }
             require(rejected, "Invalid setting accepted: " + error.second);
+            require(config.communication.port == "/dev/pts/config-test" &&
+                    config.communication.baud == 230400 && config.communication.statusMaxAgeMs == 75 &&
+                    config.communication.writeTimeoutMs == 40, "Failed reload changed communication");
             require(config.input.mode == InputMode::Image && config.yolo.inputSize == 256 &&
                     config.frameQueue.capacity == 7 && config.leftCamera.height == 3648 &&
                     config.guideLight.rightDiffLower == -10.5
@@ -168,7 +187,7 @@ int main(int argc, char** argv)
                 && config.guideLight.leftDiffUpper == 180., "Failed reload changed configuration");
         }
         write(image);
-        std::cout << "Five-section config, calibration, path and " << errors.size()
+        std::cout << "Configuration, calibration, path and " << errors.size()
                   << " invalid-setting checks passed.\n";
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

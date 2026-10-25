@@ -56,6 +56,13 @@ target_include_directories(dart_mcu_protocol INTERFACE
 )
 target_compile_features(dart_mcu_protocol INTERFACE cxx_std_17)
 
+# 实际串口收发库：内部接收线程持续运行，发送由业务按需调用。
+find_package(Threads REQUIRED)
+add_library(dart_communication src/Communication/Communication.cpp)
+add_library(dart::communication ALIAS dart_communication)
+target_link_libraries(dart_communication PUBLIC dart::mcu_protocol Threads::Threads)
+target_compile_options(dart_communication PRIVATE -Wall -Wextra -Wpedantic)
+
 # 主程序与差分调参工具共用配置、图片采集及可视化模块。
 if(DART_BUILD_MAIN OR DART_BUILD_CALIBRATION OR (DART_BUILD_HSV_TUNER AND DART_BUILD_YOLO))
     find_package(OpenCV REQUIRED COMPONENTS core imgcodecs imgproc highgui freetype)
@@ -172,20 +179,22 @@ if(DART_BUILD_MAIN)
     add_executable(dart_vision src/main.cpp)
     target_sources(dart_vision PRIVATE
         src/Computation/StereoscopicMeasurement.cpp
-        src/Computation/LocationTransform.cpp)
+        src/Computation/LocationTransform.cpp
+        src/Computation/YawSolver.cpp)
     # 默认配置定位到源码目录；模型和媒体路径由 YAML 所在目录解析。
     target_compile_definitions(dart_vision PRIVATE DART_PROJECT_ROOT="${CMAKE_CURRENT_SOURCE_DIR}")
     target_compile_options(dart_vision PRIVATE -Wall -Wextra -Wpedantic)
     target_link_libraries(dart_vision PRIVATE dart::config dart::mcu_protocol dart::acquisition dart::visualization)
-    target_link_libraries(dart_vision PRIVATE dart::camera opencv_calib3d)
+    target_link_libraries(dart_vision PRIVATE dart::camera dart::communication opencv_calib3d)
 
     if(BUILD_TESTING)
         # 相机主循环测试使用设备/感知替身；验证配对、退出和显示数据传递，不访问相机或窗口。
         add_executable(dart_camera_mode_test tests/test_camera_mode.cpp)
         target_sources(dart_camera_mode_test PRIVATE
             src/Computation/StereoscopicMeasurement.cpp
-            src/Computation/LocationTransform.cpp)
-        target_link_libraries(dart_camera_mode_test PRIVATE dart::config dart::acquisition opencv_calib3d)
+            src/Computation/LocationTransform.cpp
+            src/Computation/YawSolver.cpp)
+        target_link_libraries(dart_camera_mode_test PRIVATE dart::config dart::acquisition dart::communication opencv_calib3d)
         target_compile_definitions(dart_camera_mode_test PRIVATE
             DART_PROJECT_ROOT="${CMAKE_CURRENT_SOURCE_DIR}")
         target_compile_options(dart_camera_mode_test PRIVATE -Wall -Wextra -Wpedantic)
@@ -228,7 +237,7 @@ endif()
 if(DART_BUILD_CONTROL_DEMO)
     find_package(Threads REQUIRED)
     add_executable(dart_control_demo tests/dart_control_demo.cpp)
-    target_link_libraries(dart_control_demo PRIVATE dart::mcu_protocol Threads::Threads)
+    target_link_libraries(dart_control_demo PRIVATE dart::communication)
     target_compile_options(dart_control_demo PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
@@ -279,4 +288,14 @@ if(DART_BUILD_HSV_TUNER AND DART_BUILD_YOLO)
             ${CMAKE_CURRENT_SOURCE_DIR}/config/dart.yaml
             ${CMAKE_CURRENT_SOURCE_DIR}/outputs/hsv_tuner_tests)
     endif()
+endif()
+
+# 独立通信库测试：伪终端模拟 MCU，链接器包装 write 注入短写与暂不可写。
+if(BUILD_TESTING)
+    add_executable(dart_communication_test tests/test_communication.cpp)
+    target_link_libraries(dart_communication_test PRIVATE dart::communication)
+    target_link_options(dart_communication_test PRIVATE "-Wl,--wrap=write")
+    target_compile_options(dart_communication_test PRIVATE -Wall -Wextra -Wpedantic)
+    add_test(NAME communication_loop COMMAND dart_communication_test)
+    set_tests_properties(communication_loop PROPERTIES TIMEOUT 20)
 endif()

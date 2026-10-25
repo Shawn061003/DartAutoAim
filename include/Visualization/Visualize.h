@@ -88,6 +88,6 @@ public:
     static MetricsVisualize Metrics(const cv::Point3d& position_m);
     // 左侧XY俯视、右侧YZ侧视；0.5m方格、等比例，镖口为唯一参考原点。
     static cv::Mat Draw(const FrameVisualize& data);
-    // 返回 waitKey 的键值，供主程序处理模式切换；按键后保留窗口。
+    // delay_ms=-1 只提交画面并返回 -1；其余情况返回 waitKey 键值，按键后保留窗口。
     static int Show(const FrameVisualize& data, int delay_ms = 1);
 };

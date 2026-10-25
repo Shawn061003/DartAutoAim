@@ -148,6 +148,23 @@ InputParams readInput(const cv::FileNode& node, const std::filesystem::path& bas
     return result;
 }
 
+CommunicationParams readCommunication(const cv::FileNode& node)
+{
+    CommunicationParams result;
+    result.port = readString(node, "port", "communication");
+    result.baud = readInteger(node, "baud", "communication", 1);
+    switch (result.baud) {
+    case 9600: case 19200: case 38400: case 57600: case 115200:
+    case 230400: case 460800: case 921600:
+        break;
+    default:
+        invalid("communication.baud", "unsupported serial baud rate");
+    }
+    result.statusMaxAgeMs = readInteger(node, "status_max_age_ms", "communication", 1);
+    result.writeTimeoutMs = readInteger(node, "write_timeout_ms", "communication", 1);
+    return result;
+}
+
 FrameQueueParams readQueue(const cv::FileNode& node)
 {
     FrameQueueParams result;
@@ -225,6 +242,7 @@ void DartCongfig::load(const std::string& configPath)
         const auto base = std::filesystem::absolute(configPath).parent_path();
         auto nextInput = readInput(section(root, "input"), base);
         auto nextQueue = readQueue(section(root, "frame_queue"));
+        auto nextCommunication = readCommunication(section(root, "communication"));
         const auto cameras = section(root, "cameras");
         auto left = readCamera(cameras["left"], "cameras.left");
         auto right = readCamera(cameras["right"], "cameras.right");
@@ -236,6 +254,7 @@ void DartCongfig::load(const std::string& configPath)
         // 全部板块校验通过后提交，任何解析错误都保留之前的配置。
         input = std::move(nextInput);
         frameQueue = nextQueue;
+        communication = std::move(nextCommunication);
         leftCamera = std::move(left);
         rightCamera = std::move(right);
         yolo = std::move(nextYOLO);

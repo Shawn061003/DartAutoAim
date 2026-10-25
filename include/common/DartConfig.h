@@ -17,6 +17,14 @@ struct InputParams {
     std::string rightPath;
 };
 
+// port 为空时保留离线视觉流程；填写 Linux 串口路径后启用通信。
+struct CommunicationParams {
+    std::string port;
+    int baud = 115200;
+    int statusMaxAgeMs = 200; // 最新电控状态允许的最大年龄，毫秒。
+    int writeTimeoutMs = 100; // 单条命令的串口写入超时，毫秒。
+};
+
 struct FrameQueueParams {
     std::size_t capacity = 4;               // 每侧缓存帧数
     std::int64_t maxTimestampDiffMs = 5;    // 配对允许时间差，含等于边界
@@ -97,12 +105,13 @@ struct CameraParams {
     double extraInfoDelay = 0.0; // extra_info 延迟（秒），启用相机前确认
 };
 
-// 统一配置：加载并保存输入、相机、队列、检测与计算参数。
+// 统一配置：加载并保存输入、相机、队列、通信、检测与计算参数。
 class DartCongfig
 {
 public:
     InputParams input;
     FrameQueueParams frameQueue;
+    CommunicationParams communication;
     YOLOParams yolo;
     GuideLightParams guideLight;
     StereoscopicMeasurementParams stereoscopicmeasurement;
