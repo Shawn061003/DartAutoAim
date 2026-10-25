@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <cstdio>
 #include <fcntl.h>
 #include <poll.h>
 #include <stdexcept>
@@ -170,6 +171,13 @@ void Communication::send(const Command& command, std::chrono::milliseconds timeo
         if (running_) fail(error.what());
         throw;
     }
+
+    // 整帧写入成功后打印实际下发字段；短写重试期间不重复输出。
+    // 记录的是本地串口写入结果，电控接收和执行状态由后续回传确认。
+    std::printf("[MCU TX] fire_allowed=%d yaw_error_rad=%.17g stretch_target_mm=%.17g\n",
+                static_cast<int>(command.fire_allowed),
+                command.yaw_error_rad, command.stretch_target_mm);
+    std::fflush(stdout);
 }
 
 // 接收 loop 只在 start 后运行；poll 有数据时立即唤醒，无数据时等待。

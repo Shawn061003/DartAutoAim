@@ -6,6 +6,7 @@
 #include <csignal>
 #include <cstdlib>
 #include <fcntl.h>
+#include <limits>
 #include <poll.h>
 #include <unistd.h>
 #include <opencv2/calib3d.hpp>
@@ -133,6 +134,65 @@ void testBaseReadyToAim()
     require(!canAimAtBase({base}, frame, confirmedAt), "BASE restabilization reused old confirmation");
     require(!canAimAtBase({}, frame, confirmedAt) && !confirmedAt,
             "Missing BASE retained confirmation time");
+}
+
+void testYawAngleLimit()
+{
+    ControlMcu mcu;
+    communicationParams = CommunicationParams{};
+    communication = std::make_unique<dart_mcu::Communication>();
+    communication->start(mcu.port, communicationParams.baud);
+    lastCommandStatusSequence = 0;
+    lastCommandAt = {};
+    current_angle = 16.0 * CV_PI / 180.0;
+    mcu.publish(true);
+    auto status = communication->latestStatus(std::chrono::seconds(1));
+    require(status.has_value(), "Missing angle-limit fixture status");
+    const double originalAngle = current_angle;
+    require(!sendYawCommand(2.0 * CV_PI / 180.0, *status, communicationParams),
+            "Command exceeding 17 degrees was accepted");
+    require(!mcu.hasCommand() && current_angle == originalAngle &&
+            lastCommandStatusSequence == 0 && lastCommandAt == std::chrono::steady_clock::time_point{},
+            "Rejected yaw wrote bytes or changed command history");
+
+    // 等于上限仍可下发；确认16+1度不会被误当成越界。
+    const double oneDegree = CV_PI / 180.0;
+    require(sendYawCommand(oneDegree, *status, communicationParams), "17 degree boundary was rejected");
+    mcu.expectCommand(oneDegree);
+    require(std::abs(current_angle - 17.0 * CV_PI / 180.0) < 1e-12,
+            "Accepted command did not accumulate angle");
+    current_angle = 17.0 * CV_PI / 180.0;
+    mcu.publish(true);
+    status = communication->latestStatus(std::chrono::seconds(1));
+    require(sendYawCommand(0.0, *status, communicationParams), "Exactly 17 degrees was rejected");
+    mcu.expectCommand(0.0);
+
+    const auto previousSequence = lastCommandStatusSequence;
+    const auto previousAt = lastCommandAt;
+    require(!sendYawCommand(oneDegree, *status, communicationParams) && !mcu.hasCommand(),
+            "Second positive command crossed limit");
+    require(!sendYawCommand(std::numeric_limits<double>::infinity(), *status, communicationParams) &&
+            !sendYawCommand(std::numeric_limits<double>::quiet_NaN(), *status, communicationParams),
+            "Nonfinite command bypassed upper limit");
+    require(current_angle == 17.0 * CV_PI / 180.0 && lastCommandStatusSequence == previousSequence &&
+            lastCommandAt == previousAt && !mcu.hasCommand(), "Invalid command changed state");
+
+    // 允许向较小角度调整；不要因为当前处于上限就禁止反向恢复。
+    mcu.publish(true);
+    status = communication->latestStatus(std::chrono::seconds(1));
+    require(sendYawCommand(-oneDegree, *status, communicationParams), "Negative correction was rejected");
+    mcu.expectCommand(-oneDegree);
+    const double beforeFailure = current_angle;
+    const auto sequenceBeforeFailure = lastCommandStatusSequence;
+    const auto timeBeforeFailure = lastCommandAt;
+    mcu.disconnect();
+    ControlMcu::waitFor([&] { return !communication->isRunning(); });
+    bool failed = false;
+    try { sendYawCommand(-oneDegree, *status, communicationParams); }
+    catch (const std::runtime_error&) { failed = true; }
+    require(failed && current_angle == beforeFailure && lastCommandStatusSequence == sequenceBeforeFailure &&
+            lastCommandAt == timeBeforeFailure, "Send failure committed angle or history");
+    communication.reset();
 }
 
 void testAimControl()
@@ -332,6 +392,7 @@ int main(int argc, char** argv)
     try {
         require(argc == 2, "Expected config path");
         testBaseReadyToAim();
+        testYawAngleLimit();
         testAimControl();
         require(communication == nullptr && !preAimPending, "Control session leaked state");
         DartCongfig config(argv[1]);
@@ -380,7 +441,7 @@ int main(int argc, char** argv)
         // 真实运行主循环的 yaw 发送分支，比较当前目标求解值和电控实际收到的命令。
         controlDetections = synthetic;
         const LocationTransform actualTransform(config.locationTransform.R, config.locationTransform.T);
-        for (int scenario = 0; scenario < 3; ++scenario) {
+        for (int scenario = 0; scenario < 4; ++scenario) {
             const bool stationary = scenario != 0;
             controlMotionPerFrame = scenario == 2 ? 0.8f : 0.1f;
             auto latest = synthetic;
@@ -401,7 +462,10 @@ int main(int argc, char** argv)
             requestedAim.reset();
             preAimPending = false;
             aim_base = true;
-            const double initialAngle = std::atan(4.0 / 482.5);
+            // 第4种场景：灯已稳定、镖架静止，但本次视觉精调会使累计角度超过17度。
+            const double initialAngle = scenario == 3 ? 16.0 * CV_PI / 180.0 : std::atan(4.0 / 482.5);
+            if (scenario == 3)
+                require(initialAngle + *expectedYaw > 17.0 * CV_PI / 180.0, "Fixture does not cross angle limit");
             current_angle = initialAngle;
             aimRevision = lastCommandStatusSequence = 0;
             lastCommandAt = {};
@@ -419,7 +483,7 @@ int main(int argc, char** argv)
                 require(std::abs(current_angle - outpostAngle) < 1e-12,
                         "Pre-aim switch ignored previous visual correction");
             } else {
-                require(!mcu.hasCommand(), "Moving launcher/BASE allowed yaw command");
+                require(!mcu.hasCommand(), "Moving launcher/BASE or over-limit angle allowed yaw command");
                 require(current_angle == initialAngle, "Blocked yaw changed current angle");
             }
             controlMcu = nullptr;

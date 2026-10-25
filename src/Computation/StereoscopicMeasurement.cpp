@@ -2,9 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
-#include <iostream>
 #include <opencv2/calib3d.hpp>
-#include <sstream>
 
 std::vector<StereoscopicMeasurement::StereoscopicMeasurementResult>
 StereoscopicMeasurement::RunMeasurement(const GuideLightDetect::StereoDetectResult& result) const
@@ -32,12 +30,7 @@ std::vector<StereoscopicMeasurement::Candidate> StereoscopicMeasurement::GetCand
     };
     collectCenters(result.left, leftIndices, leftPixels);
     collectCenters(result.right, rightIndices, rightPixels);
-    std::cout << "[GetCandidate] input left=" << result.left.size()
-              << " right=" << result.right.size()
-              << "; SUCCESS left=" << leftPixels.size()
-              << " right=" << rightPixels.size() << "; indices are 0-based\n";
     if (leftPixels.empty() || rightPixels.empty()) {
-        std::cout << "[GetCandidate] accepted=0; missing SUCCESS centers on one or both sides\n";
         return {};
     }
 
@@ -84,14 +77,6 @@ std::vector<StereoscopicMeasurement::Candidate> StereoscopicMeasurement::GetCand
     // 4. 枚举左右组合；这里只生成候选，一对一匹配留给SelectFromCandidate。
     for (std::size_t left = 0; left < leftNormalized.size(); ++left) {
         for (std::size_t right = 0; right < rightNormalized.size(); ++right) {
-            // 每组配对打印一行；即使未生成候选，也保留原始编号和丢弃原因。
-            std::ostringstream debug;
-            debug.precision(9);
-            debug << "[GetCandidate] L=" << leftIndices[left] << " R=" << rightIndices[right]
-                  << " left_px=" << leftPixels[left] << " right_px=" << rightPixels[right];
-            const auto reject = [&debug](const char* reason) {
-                std::cout << debug.str() << " REJECT: " << reason << '\n';
-            };
             const cv::Vec3d leftRay(leftNormalized[left].x, leftNormalized[left].y, 1.0);
             const cv::Vec3d rightRay(rightNormalized[right].x, rightNormalized[right].y, 1.0);
             const cv::Point2d leftUndistorted = toPixel(leftK, leftRay);
@@ -103,15 +88,12 @@ std::vector<StereoscopicMeasurement::Candidate> StereoscopicMeasurement::GetCand
             const double rightLineNorm = std::hypot(rightLine[0], rightLine[1]);
             const double leftLineNorm = std::hypot(leftLine[0], leftLine[1]);
             if (!(rightLineNorm > 0.0) || !(leftLineNorm > 0.0)) {
-                reject("invalid epipolar line norm");
                 continue;
             }
             const double epipolarResidual = std::abs(rightPoint.dot(rightLine));
             const double epipolarError = std::max(epipolarResidual / rightLineNorm,
                                                   epipolarResidual / leftLineNorm);
-            debug << " epipolar_px=" << epipolarError << " (max=" << maxEpipolarErrorPx << ')';
             if (!std::isfinite(epipolarError) || epipolarError > maxEpipolarErrorPx) {
-                reject("epipolar error");
                 continue;
             }
 
@@ -119,9 +101,7 @@ std::vector<StereoscopicMeasurement::Candidate> StereoscopicMeasurement::GetCand
             const cv::Vec3d leftDirection = leftRay / cv::norm(leftRay);
             const cv::Vec3d rightDirection = rotation.t() * (rightRay / cv::norm(rightRay));
             const double raySin = cv::norm(leftDirection.cross(rightDirection));
-            debug << " ray_sin=" << raySin;
             if (!std::isfinite(raySin) || raySin <= minRaySin) {
-                reject("degenerate rays (min sin=1e-6)");
                 continue;
             }
 
@@ -130,37 +110,26 @@ std::vector<StereoscopicMeasurement::Candidate> StereoscopicMeasurement::GetCand
                                   std::vector<cv::Point2d>{leftNormalized[left]},
                                   std::vector<cv::Point2d>{rightNormalized[right]}, homogeneous);
             const double w = homogeneous.at<double>(3, 0);
-            debug << " w=" << w;
             if (!std::isfinite(w) || std::abs(w) <= minHomogeneousW) {
-                reject("invalid homogeneous w (min abs=1e-12)");
                 continue;
             }
             const cv::Vec3d positionLeft(homogeneous.at<double>(0, 0) / w,
                                          homogeneous.at<double>(1, 0) / w,
                                          homogeneous.at<double>(2, 0) / w);
             const cv::Vec3d positionRight = rotation * positionLeft + translation;
-            debug << " left_z_mm=" << positionLeft[2] << " right_xyz_mm=" << positionRight;
             if (!std::isfinite(cv::norm(positionLeft)) || !std::isfinite(cv::norm(positionRight))
                 || positionLeft[2] <= 0.0 || positionRight[2] <= 0.0) {
-                reject("non-finite position or non-positive depth");
                 continue;
             }
-            // 分类使用XZ投影距离；同时打印三维直线距离，单位均为毫米。
-            debug << " distance_xz_mm=" << std::hypot(positionRight[0], positionRight[2])
-                  << " distance_3d_mm=" << cv::norm(positionRight);
 
             // 5. 用去畸变像素检查重投影误差；输出位置转为右相机坐标，单位毫米。
             const double leftError = cv::norm(toPixel(leftK, positionLeft) - leftUndistorted);
             const double rightError = cv::norm(toPixel(rightK, positionRight) - rightUndistorted);
-            debug << " reprojection_left_px=" << leftError << " reprojection_right_px=" << rightError
-                  << " (max=" << maxReprojectionErrorPx << ')';
             if (!std::isfinite(leftError) || !std::isfinite(rightError)) {
-                reject("non-finite reprojection error");
                 continue;
             }
             const double reprojectionError = std::max(leftError, rightError);
             if (reprojectionError > maxReprojectionErrorPx) {
-                reject("reprojection error");
                 continue;
             }
 
@@ -176,11 +145,8 @@ std::vector<StereoscopicMeasurement::Candidate> StereoscopicMeasurement::GetCand
             candidate.epipolarErrorPx = epipolarError;
             candidate.reprojectionErrorPx = reprojectionError;
             candidates.push_back(candidate);
-            std::cout << debug.str() << " ACCEPT candidate=" << candidates.size() - 1 << '\n';
         }
     }
-    std::cout << "[GetCandidate] accepted=" << candidates.size()
-              << " / pairs=" << leftPixels.size() * rightPixels.size() << '\n';
     return candidates;
 }
 

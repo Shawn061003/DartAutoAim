@@ -46,6 +46,7 @@ bool aim_base = true;
 // 当前角度估计，单位rad、右转增大；以初始安装角和成功下发的相对yaw累计。
 // 电控当前仅回传静止状态，此值未经过编码器角度反馈校正。
 double current_angle = std::atan(4.0 / 482.5);
+constexpr double kMaxYawAngleRad = 17.0 * CV_PI / 180.0; // 累计角度上限，等于17度允许发送。
 
 // 配置由 DartCongfig 解析；通信对象在相机流程结束后释放。
 CommunicationParams communicationParams;
@@ -76,6 +77,27 @@ std::string parseConfigPath(int argc, char* argv[])
         std::string(argv[2]).size() > 0 && std::string(argv[2]).rfind("--", 0) != 0)
         return argv[2];
     throw std::invalid_argument("Expected --config path.yaml; configure input/communication in YAML");
+}
+
+// ----------------------------------------------------------------
+// 统一yaw下发：先检查累计角度上限，写入成功后再提交角度与命令历史
+// ----------------------------------------------------------------
+// 调用方负责镖架静止和回传时序检查；预瞄准、搜索、精调均通过这里发送。
+bool sendYawCommand(double relativeYaw, const dart_mcu::ReceivedStatus& status,
+                    const CommunicationParams& params)
+{
+    const double nextAngle = current_angle + relativeYaw;
+    if (!std::isfinite(nextAngle) || nextAngle > kMaxYawAngleRad) {
+        std::cerr << "[Yaw] command rejected: resulting angle=" << nextAngle * 180.0 / CV_PI
+                  << " deg, maximum=17 deg\n";
+        return false;
+    }
+    communication->send({0, relativeYaw, 0}, std::chrono::milliseconds(params.writeTimeoutMs));
+    // 被拒绝或send抛异常时均不提交；此处记录的是成功写入的命令角度估计。
+    current_angle = nextAngle;
+    lastCommandStatusSequence = status.sequence;
+    lastCommandAt = std::chrono::steady_clock::now();
+    return true;
 }
 
 // ----------------------------------------------------------------
@@ -110,14 +132,9 @@ bool handleAimModeKey(int key)
             // 电控接收相对yaw，右转为正，因此发送“预设角度 - 当前角度”。
             const double preset_angle = (aim_base ? 15.8 : 10.5) * CV_PI / 180.0;
             const double relative_yaw = preset_angle - current_angle;
-            communication->send({0, relative_yaw, 0},
-                std::chrono::milliseconds(communicationParams.writeTimeoutMs));
-            // 仅在完整写入成功后累计；等待或发送异常时保留之前的估计角度。
-            current_angle += relative_yaw;
-            // step3  完整写入成功后，记录使用过的回传和命令时间，再清除待发标记。
-            lastCommandStatusSequence = status->sequence;
-            lastCommandAt = std::chrono::steady_clock::now();
-            preAimPending = false;
+            // step3  统一检查17度上限；发送成功后才清除待发标记。
+            if (sendYawCommand(relative_yaw, *status, communicationParams))
+                preAimPending = false;
         }
     }
     return modeKey;
@@ -399,6 +416,7 @@ int runCameraMode(const DartCongfig& config)
                 if (searchYaw != 0.0) yaw = searchYaw;
             } else {
                 yaw = yawsolver.RunSolve(locations, aim_base);
+                printf("[YawSolver] target at %f send yaw %f \n", current_angle + yaw*3.14/180, yaw*3.14/180);
             }
         }
 
@@ -417,12 +435,7 @@ int runCameraMode(const DartCongfig& config)
         const auto status = checkSendConditions(yaw, *frame, frameAimRevision, config.communication);
         if (status) {
             // yaw 单位 rad、右正左负；本阶段开火许可与伸缩目标均为 0。
-            communication->send({0, *yaw, 0},
-                std::chrono::milliseconds(config.communication.writeTimeoutMs));
-            // 视觉精调同样是相对角度，成功发送后纳入当前角度估计。
-            current_angle += *yaw;
-            lastCommandStatusSequence = status->sequence;
-            lastCommandAt = std::chrono::steady_clock::now();
+            sendYawCommand(*yaw, *status, config.communication);
         }
     }
 
