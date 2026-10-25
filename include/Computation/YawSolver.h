@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Perception/GuideLightDetect.h"
 #include "Computation/LocationTransform.h"
 #include <optional>
 #include <vector>
@@ -20,4 +21,12 @@ public:
     std::optional<double> RunSolve(
         const std::vector<LocationTransform::LocationTransformResult>& locations,
         bool aim_base) const;
+
+    /// @brief 右相机未检出目标时，根据左图目标位置返回固定搜索步长。
+    /// @param detections 左相机当前帧检测结果，按输入顺序使用首个SUCCESS且u有限的目标。
+    /// @return u<2552时返回+1.1度，否则返回-1.1度；结果单位rad，右正左负。
+    ///         没有有效目标时返回0，调用方跳过本帧搜索命令。
+    /// @note 阈值2552像素近似对应当前标定下镖口X=0、Y=24.5米的目标投影。
+    ///       步长依据初始朝向15.8度、目标方位14.7～16.9度时最大1.1度偏差选取。
+    double RunSearch(const GuideLightDetect::DetectResult& detections) const;
 };

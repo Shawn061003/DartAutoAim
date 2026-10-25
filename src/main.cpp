@@ -11,6 +11,7 @@
 #include "Communication/Communication.hpp"
 #include "Visualization/Visualize.h"
 
+#include <algorithm>
 #include <chrono>
 #include <exception>
 #include <filesystem>
@@ -247,17 +248,31 @@ int runCameraMode(const DartCongfig& config)
         // 4. 完成左右帧的 YOLO ROI 提取和引导灯检测，保持原图坐标及帧来源。
         const auto frameAimRevision = aimRevision;
         const auto detections = processFrame(*frame, yolo, guideLight);
-        // 5. 双目测距；空结果刷新为空面板，不沿用之前的目标。
-        const auto measurements = stereoscopicmeasurement.RunMeasurement(detections);
-        // 6. 坐标转换。
-        const auto locations = locationtransform.RunTransform(measurements);
-        // 只提交位置画面，窗口事件和目标切换统一在 processFrame 中处理。
+        // 右侧没有 SUCCESS 项时进入搜索；集合为空或全部为 FAILED 均满足条件。
+        const bool needSearch = std::none_of(detections.right.begin(), detections.right.end(),
+            [](const auto& result) {
+                return result.status == GuideLightDetect::DetectStatus::SUCCESS;
+            });
+
+        // 每帧重新保存求解结果，搜索和双目分支最终共用下面的发送流程。
+        std::optional<double> yaw;
+        std::vector<LocationTransform::LocationTransformResult> locations;
+        if (needSearch) {
+            // 5. 根据左图目标位置搜索；没有有效左侧目标时保持空值，不发送调整。
+            const double searchYaw = yawsolver.RunSearch(detections.left);
+            if (searchYaw != 0.0) yaw = searchYaw;
+        } else {
+            // 5. 右侧存在成功目标，继续双目测距；配对失败时返回空结果。
+            const auto measurements = stereoscopicmeasurement.RunMeasurement(detections);
+            // 6. 转换到镖口坐标，并求解当前选择目标的 yaw。
+            locations = locationtransform.RunTransform(measurements);
+            yaw = yawsolver.RunSolve(locations, aim_base);
+        }
+
+        // 7. 只提交位置画面；搜索或测距无结果时显示空面板，清除上一帧位置。
+        // 窗口事件和目标切换统一在 processFrame 中处理。
         StereoscopicMeasurementVisualize::Show(makeLocationVisualize(locations), -1);
-
         if (stopSignals.stopRequested()) break;
-
-        // 7. 仅求解当前选择的目标；目标缺失或无效时返回空值。
-        const auto yaw = yawsolver.RunSolve(locations, aim_base);
 
         // 8. 检查发送条件，通过后直接下发本帧 yaw。
         const auto status = checkSendConditions(yaw, *frame, frameAimRevision, config.communication);

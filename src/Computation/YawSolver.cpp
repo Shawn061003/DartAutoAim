@@ -24,3 +24,19 @@ std::optional<double> YawSolver::RunSolve(
     // 所选类别缺失时，不切换目标，也不沿用上一帧结果。
     return std::nullopt;
 }
+
+double YawSolver::RunSearch(const GuideLightDetect::DetectResult& detections) const
+{
+    constexpr double targetUPx = 2552.0;
+    // 初始15.8度，目标14.7～16.9度，最大偏差1.1度。
+    constexpr double searchStepRad = 1.1 * 3.14159265358979323846 / 180.0;
+    for (const auto& detection : detections) {
+        if (detection.status != GuideLightDetect::DetectStatus::SUCCESS ||
+            !std::isfinite(detection.CenterPoint.x)) continue;
+
+        // 严格按搜索方向约定：u小于阈值向右，否则向左。
+        return detection.CenterPoint.x < targetUPx ? searchStepRad : -searchStepRad;
+    }
+
+    return 0.0;
+}
