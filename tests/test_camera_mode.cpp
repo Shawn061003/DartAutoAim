@@ -142,6 +142,10 @@ void testAimControl()
     communication = std::make_unique<dart_mcu::Communication>();
     communication->start(mcu.port, communicationParams.baud);
     aim_base = true;
+    const double initialAngle = std::atan(4.0 / 482.5);
+    const double baseAngle = 15.8 * CV_PI / 180.0;
+    const double outpostAngle = 10.5 * CV_PI / 180.0;
+    current_angle = initialAngle;
     requestedAim.reset();
     preAimPending = false;
     lastCommandStatusSequence = aimRevision = 0;
@@ -149,6 +153,7 @@ void testAimControl()
 
     handleAimModeKey('1');
     require(preAimPending && !mcu.hasCommand(), "Unknown status allowed pre-aim");
+    require(current_angle == initialAngle, "Unknown status changed current angle");
     mcu.publish(false);
     handleAimModeKey(-1);
     require(preAimPending && !mcu.hasCommand(), "Moving state allowed pre-aim");
@@ -158,7 +163,8 @@ void testAimControl()
     require(!aim_base && !mcu.hasCommand(), "Pending target did not keep latest selection");
     mcu.publish(true);
     handleAimModeKey(-1);
-    mcu.expectCommand(0.17);
+    mcu.expectCommand(outpostAngle - initialAngle);
+    require(std::abs(current_angle - outpostAngle) < 1e-12, "OUTPOST angle was not accumulated");
     require(!preAimPending, "Queued pre-aim was not cleared");
     handleAimModeKey('2');
     require(!preAimPending && !mcu.hasCommand(), "Repeated mode key reissued command");
@@ -168,9 +174,17 @@ void testAimControl()
     std::this_thread::sleep_for(std::chrono::milliseconds(communicationParams.statusMaxAgeMs + 20));
     handleAimModeKey(-1);
     require(preAimPending && !mcu.hasCommand(), "Expired status allowed pre-aim");
+    require(std::abs(current_angle - outpostAngle) < 1e-12, "Expired status changed current angle");
     mcu.publish(true);
     handleAimModeKey(-1);
-    mcu.expectCommand(0.26);
+    mcu.expectCommand(baseAngle - outpostAngle);
+    require(std::abs(current_angle - baseAngle) < 1e-12, "BASE switch reused an absolute command");
+
+    // 切回前哨站应发送负相对角度，验证连续切换会使用上次累计的方向。
+    mcu.publish(true);
+    handleAimModeKey('2');
+    mcu.expectCommand(outpostAngle - baseAngle);
+    require(std::abs(current_angle - outpostAngle) < 1e-12, "Reverse switch did not update angle");
 
     mcu.disconnect();
     ControlMcu::waitFor([&] { return !communication->isRunning(); });
@@ -387,12 +401,27 @@ int main(int argc, char** argv)
             requestedAim.reset();
             preAimPending = false;
             aim_base = true;
+            const double initialAngle = std::atan(4.0 / 482.5);
+            current_angle = initialAngle;
             aimRevision = lastCommandStatusSequence = 0;
             lastCommandAt = {};
             mcu.publish(stationary);
             require(runCameraMode(config) == 0, "Control camera run failed");
-            if (scenario == 1) mcu.expectCommand(*expectedYaw);
-            else require(!mcu.hasCommand(), "Moving launcher/BASE allowed yaw command");
+            if (scenario == 1) {
+                mcu.expectCommand(*expectedYaw);
+                require(std::abs(current_angle - (initialAngle + *expectedYaw)) < 1e-12,
+                        "Visual correction was not accumulated in current angle");
+                const double angleAfterCorrection = current_angle;
+                mcu.publish(true);
+                handleAimModeKey('2');
+                const double outpostAngle = 10.5 * CV_PI / 180.0;
+                mcu.expectCommand(outpostAngle - angleAfterCorrection);
+                require(std::abs(current_angle - outpostAngle) < 1e-12,
+                        "Pre-aim switch ignored previous visual correction");
+            } else {
+                require(!mcu.hasCommand(), "Moving launcher/BASE allowed yaw command");
+                require(current_angle == initialAngle, "Blocked yaw changed current angle");
+            }
             controlMcu = nullptr;
             communication.reset();
             controlRun = false;

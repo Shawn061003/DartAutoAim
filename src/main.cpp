@@ -43,6 +43,10 @@ const std::filesystem::path kProjectRoot{DART_PROJECT_ROOT};
 // true 选择基地，false 选择前哨站；只在主线程更新。
 bool aim_base = true;
 
+// 当前角度估计，单位rad、右转增大；以初始安装角和成功下发的相对yaw累计。
+// 电控当前仅回传静止状态，此值未经过编码器角度反馈校正。
+double current_angle = std::atan(4.0 / 482.5);
+
 // 配置由 DartCongfig 解析；通信对象在相机流程结束后释放。
 CommunicationParams communicationParams;
 std::unique_ptr<dart_mcu::Communication> communication;
@@ -102,9 +106,14 @@ bool handleAimModeKey(int key)
             std::chrono::milliseconds(communicationParams.statusMaxAgeMs));
         if (status && status->status.is_stationary == 1 &&
             status->sequence > lastCommandStatusSequence && status->received_at > lastCommandAt) {
-            // 固定预瞄准角度单位为rad；本阶段开火许可和伸缩目标均为0。
-            communication->send({0, aim_base ? 0.26 : 0.17, 0},
+            // 预设为相对初始参考方向的绝对角度：基地15.8度，前哨站10.5度。
+            // 电控接收相对yaw，右转为正，因此发送“预设角度 - 当前角度”。
+            const double preset_angle = (aim_base ? 15.8 : 10.5) * CV_PI / 180.0;
+            const double relative_yaw = preset_angle - current_angle;
+            communication->send({0, relative_yaw, 0},
                 std::chrono::milliseconds(communicationParams.writeTimeoutMs));
+            // 仅在完整写入成功后累计；等待或发送异常时保留之前的估计角度。
+            current_angle += relative_yaw;
             // step3  完整写入成功后，记录使用过的回传和命令时间，再清除待发标记。
             lastCommandStatusSequence = status->sequence;
             lastCommandAt = std::chrono::steady_clock::now();
@@ -410,6 +419,8 @@ int runCameraMode(const DartCongfig& config)
             // yaw 单位 rad、右正左负；本阶段开火许可与伸缩目标均为 0。
             communication->send({0, *yaw, 0},
                 std::chrono::milliseconds(config.communication.writeTimeoutMs));
+            // 视觉精调同样是相对角度，成功发送后纳入当前角度估计。
+            current_angle += *yaw;
             lastCommandStatusSequence = status->sequence;
             lastCommandAt = std::chrono::steady_clock::now();
         }
@@ -455,6 +466,7 @@ int main(int argc, char* argv[])
         requestedAim.reset();
         aimRevision = lastCommandStatusSequence = 0;
         lastCommandAt = {};
+        current_angle = std::atan(4.0 / 482.5); // 每次启动从已知初始安装角开始累计。
 
         // ----------------------------------------------------------------
         // step4  仅相机模式且串口路径非空时，启动后台通信
