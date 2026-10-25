@@ -16,6 +16,7 @@ public:
             std::numeric_limits<double>::quiet_NaN(),
             std::numeric_limits<double>::quiet_NaN()}; // 镖口坐标，毫米
         TargetClasses TargetName = TargetClasses::UNKNOWN;
+        bool stable = false; // 原样传递测距阶段对当前目标的稳定性判断。
     };
 
     /// @brief 初始化坐标转换器，保存外参矩阵的独立副本。

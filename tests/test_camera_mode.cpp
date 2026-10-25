@@ -16,6 +16,9 @@ int measurementShows = 0;
 int detectionKey = -1, measurementKey = -1;
 bool active = false, failStart = false, failDetection = false, emptyResults = false;
 bool controlRun = false;
+float controlMotionPerFrame = 0;
+class ControlMcu;
+ControlMcu* controlMcu = nullptr;
 StereoFrameQueue* controlQueue = nullptr;
 GuideLightDetect::StereoDetectResult controlDetections;
 
@@ -107,6 +110,31 @@ private:
     int master_ = -1;
 };
 
+void testBaseReadyToAim()
+{
+    StereoFrame frame;
+    LocationTransform::LocationTransformResult base;
+    base.TargetName = TargetClasses::BASE;
+    base.stable = true;
+    std::optional<std::int64_t> confirmedAt;
+    require(!canAimAtBase({base}, frame, confirmedAt) && confirmedAt,
+            "First stable result must only record confirmation time");
+    frame.left.timestamp_ms = *confirmedAt;
+    frame.right.timestamp_ms = *confirmedAt + 1;
+    require(!canAimAtBase({base}, frame, confirmedAt), "Stale left frame allowed aiming");
+    std::swap(frame.left.timestamp_ms, frame.right.timestamp_ms);
+    require(!canAimAtBase({base}, frame, confirmedAt), "Stale right frame allowed aiming");
+    frame.left.timestamp_ms = frame.right.timestamp_ms = *confirmedAt + 1;
+    require(canAimAtBase({base}, frame, confirmedAt), "Fresh stable stereo pair was rejected");
+    base.stable = false;
+    require(!canAimAtBase({base}, frame, confirmedAt) && !confirmedAt,
+            "Unstable BASE retained confirmation time");
+    base.stable = true;
+    require(!canAimAtBase({base}, frame, confirmedAt), "BASE restabilization reused old confirmation");
+    require(!canAimAtBase({}, frame, confirmedAt) && !confirmedAt,
+            "Missing BASE retained confirmation time");
+}
+
 void testAimControl()
 {
     ControlMcu mcu;
@@ -169,9 +197,11 @@ void CameraInput::StartCamera()
     if (failStart) throw std::runtime_error("injected startup failure");
     CameraFrame left{cv::Mat(8, 8, CV_8UC3, cv::Scalar(0, 0, 0)), 1, 0, CameraSide::Left};
     CameraFrame right{left.image, 9, 100, CameraSide::Right};
-    if (controlRun)
+    if (controlRun) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
         right.timestamp_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count();
+    }
     queue_->push(left, right);
     // 第一次 GetFrame 丢弃旧左帧并返回 nullopt；下一次应取得这张新左帧。
     left.frame_id = 2;
@@ -208,8 +238,21 @@ GuideLightDetect::StereoDetectResult GuideLightDetect::RunDetection(
         require(rois.left.at(0).frame_id == left.frame_id && rois.right.at(0).frame_id == right.frame_id,
                 "YOLO results were not forwarded to traditional vision");
     // 用真实退出信号验证本次检测完成后正常退出；FAILED 和空集合均不能阻碍退出。
-    if (!controlRun || detectionCalls == 2) std::raise(SIGINT);
-    if (controlRun) return controlDetections;
+    if (!controlRun || detectionCalls == 7) std::raise(SIGINT);
+    if (controlRun) {
+        auto detections = controlDetections;
+        for (auto& d : detections.left) {
+            d.timestamp_ms = left.timestamp_ms;
+            d.frame_id = left.frame_id;
+            d.CenterPoint.x += controlMotionPerFrame*detectionCalls;
+        }
+        for (auto& d : detections.right) {
+            d.timestamp_ms = right.timestamp_ms;
+            d.frame_id = right.frame_id;
+            d.CenterPoint.x += controlMotionPerFrame*detectionCalls;
+        }
+        return detections;
+    }
     StereoDetectResult result;
     if (!emptyResults) {
         GuideLightDetectResult failed;
@@ -254,7 +297,10 @@ int StereoscopicMeasurementVisualize::Show(const FrameVisualize& data, int delay
     require(guideShows == measurementShows, "Measurement shown before detection");
     if (controlRun) {
         require(data.targets.size() == 1, "Control target was not measured");
-        if (measurementShows == 1) {
+        if (measurementShows <= 6)
+            require(!controlMcu->hasCommand(), "BASE sent before five observations and a subsequent fresh frame");
+        if (measurementShows < 7) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
             const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now().time_since_epoch()).count();
             CameraFrame left{cv::Mat(8, 8, CV_8UC3, cv::Scalar(0, 0, 0)), 2, now, CameraSide::Left};
@@ -271,6 +317,7 @@ int main(int argc, char** argv)
 {
     try {
         require(argc == 2, "Expected config path");
+        testBaseReadyToAim();
         testAimControl();
         require(communication == nullptr && !preAimPending, "Control session leaked state");
         DartCongfig config(argv[1]);
@@ -296,7 +343,7 @@ int main(int argc, char** argv)
         synthetic.left.push_back(detected);
         detected.CenterPoint = rightPixel[0];
         synthetic.right.push_back(detected);
-        const StereoscopicMeasurement estimator(config.leftCamera, config.rightCamera,
+        StereoscopicMeasurement estimator(config.leftCamera, config.rightCamera,
             config.stereoscopicmeasurement.R, config.stereoscopicmeasurement.T);
         const auto measured = estimator.RunMeasurement(synthetic);
         require(measured.size() == 1 && measured[0].TargetName == TargetClasses::BASE,
@@ -319,12 +366,21 @@ int main(int argc, char** argv)
         // 真实运行主循环的 yaw 发送分支，比较当前目标求解值和电控实际收到的命令。
         controlDetections = synthetic;
         const LocationTransform actualTransform(config.locationTransform.R, config.locationTransform.T);
-        const auto expectedYaw = YawSolver{}.RunSolve(actualTransform.RunTransform(measured), true);
-        require(expectedYaw.has_value(), "Synthetic control yaw missing");
-        for (const bool stationary : {false, true}) {
+        for (int scenario = 0; scenario < 3; ++scenario) {
+            const bool stationary = scenario != 0;
+            controlMotionPerFrame = scenario == 2 ? 0.8f : 0.1f;
+            auto latest = synthetic;
+            for (auto& d : latest.left) d.CenterPoint.x += controlMotionPerFrame*6;
+            for (auto& d : latest.right) d.CenterPoint.x += controlMotionPerFrame*6;
+            auto expectedEstimator = StereoscopicMeasurement(config.leftCamera, config.rightCamera,
+                config.stereoscopicmeasurement.R, config.stereoscopicmeasurement.T);
+            const auto expectedYaw = YawSolver{}.RunSolve(
+                actualTransform.RunTransform(expectedEstimator.RunMeasurement(latest)), true);
+            require(expectedYaw.has_value(), "Synthetic control yaw missing");
             reset();
             controlRun = true;
             ControlMcu mcu;
+            controlMcu = &mcu;
             communicationParams = config.communication;
             communication = std::make_unique<dart_mcu::Communication>();
             communication->start(mcu.port, communicationParams.baud);
@@ -335,8 +391,9 @@ int main(int argc, char** argv)
             lastCommandAt = {};
             mcu.publish(stationary);
             require(runCameraMode(config) == 0, "Control camera run failed");
-            if (stationary) mcu.expectCommand(*expectedYaw);
-            else require(!mcu.hasCommand(), "Moving status allowed yaw command");
+            if (scenario == 1) mcu.expectCommand(*expectedYaw);
+            else require(!mcu.hasCommand(), "Moving launcher/BASE allowed yaw command");
+            controlMcu = nullptr;
             communication.reset();
             controlRun = false;
         }

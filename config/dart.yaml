@@ -3,9 +3,16 @@
 # 完整配置。输入模式仅由 input.mode 选择：camera / video / image。
 # 媒体与模型相对路径以本 YAML 所在目录为基准。
 input:
-   mode: "camera"
+   mode: "image"
    left_path: "/home/shiba/DartAutoAim/Input/InputImage/left1.bmp"    # TODO: image/video 模式填写左侧图片或视频路径
    right_path: "/home/shiba/DartAutoAim/Input/InputImage/right1.bmp"   # TODO: image/video 模式填写右侧图片或视频路径
+
+# 串口收发：填写实际设备路径后启用；空路径保留离线视觉流程。
+communication:
+   port: "/dev/serial/by-id/usb-STMicroelectronics_STM32_Virtual_ComPort_3067358E3034-if00"
+   baud: 115200              # 8N1，关闭流控
+   status_max_age_ms: 200     # 按电控状态回传周期设置，超时暂停发送
+   write_timeout_ms: 100
 
 # 标定矩阵对应 image_width/image_height；缩放或裁剪后须调整内参。
 # 相机与网口 IP 已实机确认；标定时 OffsetX/OffsetY 均为 0，采集时保持一致。
@@ -101,10 +108,3 @@ location_transform:
       cols: 1
       dt: d
       data: [ 240.0, -18.83, 231.45 ]
-
-# 串口收发：填写实际设备路径后启用；空路径保留离线视觉流程。
-communication:
-   port: "/dev/serial/by-id/usb-STMicroelectronics_STM32_Virtual_ComPort_3067358E3034-if00"
-   baud: 115200              # 8N1，关闭流控
-   status_max_age_ms: 200     # 按电控状态回传周期设置，超时暂停发送
-   write_timeout_ms: 100

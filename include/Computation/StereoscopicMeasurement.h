@@ -3,6 +3,8 @@
 #include "Perception/GuideLightDetect.h"
 #include "common/DartConfig.h"
 #include <cstddef>
+#include <cstdint>
+#include <deque>
 #include <limits>
 #include <opencv2/core.hpp>
 #include <vector>
@@ -32,6 +34,7 @@ public:
         double rightReprojectionErrorPx = std::numeric_limits<double>::quiet_NaN();
         // 两侧重投影误差的最大值，单位像素；由SelectFromCandidate从选中候选填入。
         double reprojectionErrorPx = std::numeric_limits<double>::quiet_NaN();
+        bool stable = false; // BASE须连续5次新观测的左右中心最大位移均<2px；OUTPOST直接为true。
     };
 
     /// @brief 初始化测距器，保存标定矩阵的独立副本，不读取配置文件。
@@ -63,10 +66,25 @@ public:
     /// @return 仅包含通过几何与先验检查的有效结果，数量0～2；BASE/OUTPOST各最多一个。
     /// @note 调用方通过TargetName区分类别，不依赖下标；目标缺失时不添加占位项。
     ///       UNKNOWN仅用于默认初始化，当前入口不输出未识别目标。
+    ///       本入口只测距、分类；BASE默认stable=false，OUTPOST直接stable=true，不更新历史。
     std::vector<StereoscopicMeasurementResult> RunMeasurement(
         const GuideLightDetect::StereoDetectResult& result) const;
 
+    // 仅为允许观察的新帧调用：分类后更新BASE的5次观测窗口，并写入stable标签。
+    // measurements须由同一份detections经RunMeasurement得到；BASE缺失时清空历史。
+    void UpdateStability(const GuideLightDetect::StereoDetectResult& detections,
+                         std::vector<StereoscopicMeasurementResult>& measurements);
+
+    // 镖架运动、切换目标或发送运动命令后，由调用方清空BASE的历史观测。
+    void ResetStability() noexcept;
+
 private:
+    struct BaseObservation {
+        cv::Point2f leftPixel, rightPixel;
+        std::int64_t leftTimestampMs, rightTimestampMs;
+    };
+    std::deque<BaseObservation> baseHistory_; // 只存最近5次BASE观测，不持有图像。
+
     struct Candidate {
         // 索引指向原始StereoDetectResult的左右集合；过滤失败项时仍保留原索引。
         std::size_t leftIndex = 0;
