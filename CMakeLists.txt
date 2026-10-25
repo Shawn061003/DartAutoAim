@@ -178,6 +178,7 @@ if(DART_BUILD_MAIN)
     find_package(OpenCV REQUIRED COMPONENTS core calib3d)
     add_executable(dart_vision src/main.cpp)
     target_sources(dart_vision PRIVATE
+        src/Visualization/VisualizeAdapter.cpp
         src/Computation/StereoscopicMeasurement.cpp
         src/Computation/LocationTransform.cpp
         src/Computation/YawSolver.cpp)
@@ -191,6 +192,7 @@ if(DART_BUILD_MAIN)
         # 相机主循环测试使用设备/感知替身；验证配对、退出和显示数据传递，不访问相机或窗口。
         add_executable(dart_camera_mode_test tests/test_camera_mode.cpp)
         target_sources(dart_camera_mode_test PRIVATE
+            src/Visualization/VisualizeAdapter.cpp
             src/Computation/StereoscopicMeasurement.cpp
             src/Computation/LocationTransform.cpp
             src/Computation/YawSolver.cpp)

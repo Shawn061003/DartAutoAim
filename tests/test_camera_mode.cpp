@@ -356,13 +356,13 @@ int main(int argc, char** argv)
         const cv::Mat dartTranslation = (cv::Mat_<double>(3, 1) << 240, -18.83, 231.45);
         const LocationTransform locationtransform(dartRotation, dartTranslation);
         const auto locations = locationtransform.RunTransform(measured);
-        const auto visual = makeLocationVisualize(locations);
+        const auto visual = visualization::makeLocationVisualize(locations);
         require(visual.targets.size() == 1, "Location adapter lost target");
         require(cv::norm(visual.targets[0].position_m - cv::Point3d(0.740, 23.98117, 1.03145)) < 0.001,
                 "Visualization must use transformed dart coordinates in meters");
         require(visual.targets[0].target_class == StereoscopicMeasurementVisualize::TargetClassVisualize::BASE,
                 "Location adapter lost target class");
-        require(makeLocationVisualize({}).targets.empty(), "Empty locations created a stale target");
+        require(visualization::makeLocationVisualize({}).targets.empty(), "Empty locations created a stale target");
         // 真实运行主循环的 yaw 发送分支，比较当前目标求解值和电控实际收到的命令。
         controlDetections = synthetic;
         const LocationTransform actualTransform(config.locationTransform.R, config.locationTransform.T);
