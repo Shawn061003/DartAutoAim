@@ -16,10 +16,14 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <opencv2/highgui.hpp>
 
 namespace {
 // 默认配置定位到源码目录；显式 --config 路径以进程工作目录为基准。
 const std::filesystem::path kProjectRoot{DART_PROJECT_ROOT};
+
+// 当前仅保存按键选择；true 为基地，false 为前哨站，后续用途待接入。
+bool aim_base = true;
 
 void printUsage(const char* program)
 {
@@ -79,6 +83,17 @@ StereoscopicMeasurementVisualize::FrameVisualize makeLocationVisualize(
     return data;
 }
 
+// 只在主线程更新瞄准模式；true 选择基地，false 选择前哨站。
+// 返回 true 表示收到模式键，图片模式据此继续等待后续按键。
+bool handleAimModeKey(int key)
+{
+    if (key != '1' && key != '2') return false;
+    aim_base = key == '1';
+    std::cout << "Aim mode: " << (aim_base ? "BASE" : "OUTPOST")
+              << " (aim_base=" << (aim_base ? "true" : "false") << ")" << std::endl;
+    return true;
+}
+
 // 一对匹配帧共享同一条检测链；图像、YOLO ROI 和传统视觉结果保持原图坐标。
 // 返回值保留两侧各自的帧号、时间戳和检测状态，供后续模块继续使用。
 GuideLightDetect::StereoDetectResult processFrame(
@@ -89,10 +104,11 @@ GuideLightDetect::StereoDetectResult processFrame(
     // 第二步：在各 ROI 内提取绿色轮廓并拟合中心，完成本阶段视觉检测。
     const auto detections = guideLight.RunDetection(frame.left, frame.right, rois);
     // 一个 detection 窗口，上层 YOLO、下层传统视觉，每对帧只刷新一次。
-    DetectionVisualize::Show(makeYOLOVisualize(frame.left, rois.left),
+    const int key = DetectionVisualize::Show(makeYOLOVisualize(frame.left, rois.left),
                              makeYOLOVisualize(frame.right, rois.right),
                              makeGuideLightVisualize(frame.left, detections.left),
                              makeGuideLightVisualize(frame.right, detections.right));
+    handleAimModeKey(key);
     return detections;
 }
 
@@ -120,9 +136,10 @@ int runImageMode(const DartCongfig& config)
               << " right_frame=" << frame->right.frame_id << '\n';
     const auto measurements = measurement.RunMeasurement(detections);
     const auto locations = locationtransform.RunTransform(measurements);
-    // 两个窗口均创建后再等待按键；GTK3 关闭全部窗口也可结束图片模式。
-    StereoscopicMeasurementVisualize::Show(
-        makeLocationVisualize(locations), 0);
+    // 模式键只更新选择；其它按键或关闭全部窗口结束本次图片处理。
+    const auto visual = makeLocationVisualize(locations);
+    while (handleAimModeKey(StereoscopicMeasurementVisualize::Show(visual, 0))) {}
+    cv::destroyAllWindows();
     return 0;
 }
 
@@ -158,7 +175,8 @@ int runCameraMode(const DartCongfig& config)
         const auto measurements = stereoscopicmeasurement.RunMeasurement(detections);
         // 6. 坐标转换。
         const auto locations = locationtransform.RunTransform(measurements);
-        StereoscopicMeasurementVisualize::Show(makeLocationVisualize(locations), 1);
+        handleAimModeKey(
+            StereoscopicMeasurementVisualize::Show(makeLocationVisualize(locations), 1));
     }
 
     // 7. 正常退出显式停止；初始化或检测抛异常时由 CameraInput 析构完成同样清理。
@@ -180,6 +198,8 @@ int main(int argc, char* argv[])
         const auto configPath = parseConfigPath(argc, argv);
         std::cout << "Configuration: " << configPath << '\n';
         const DartCongfig config(configPath);
+        aim_base = true; // 每次启动默认瞄准基地，运行期间由 1/2 键切换。
+        std::cout << "Aim mode: BASE. Focus a visualization window; 1=BASE, 2=OUTPOST." << std::endl;
         switch (config.input.mode) {
         case InputMode::Image:
             return runImageMode(config);

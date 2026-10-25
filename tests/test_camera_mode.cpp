@@ -9,6 +9,7 @@
 namespace {
 int yoloLoads = 0, yoloCalls = 0, detectionCalls = 0, stopCalls = 0, yoloShows = 0, guideShows = 0;
 int measurementShows = 0;
+int detectionKey = -1, measurementKey = -1;
 bool active = false, failStart = false, failDetection = false, emptyResults = false;
 
 void require(bool condition, const char* message)
@@ -19,6 +20,7 @@ void reset()
 {
     yoloLoads = yoloCalls = detectionCalls = stopCalls = yoloShows = guideShows = 0;
     measurementShows = 0;
+    detectionKey = measurementKey = -1;
     active = failStart = failDetection = emptyResults = false;
 }
 void priorSignalHandler(int) {}
@@ -86,7 +88,7 @@ GuideLightDetect::StereoDetectResult GuideLightDetect::RunDetection(
     return result;
 }
 
-void DetectionVisualize::Show(const YOLOInferenceVisualize::FrameVisualize& yoloLeft,
+int DetectionVisualize::Show(const YOLOInferenceVisualize::FrameVisualize& yoloLeft,
                               const YOLOInferenceVisualize::FrameVisualize& yoloRight,
                               const GuideLightDetectVisualize::FrameVisualize& left,
                               const GuideLightDetectVisualize::FrameVisualize& right, int delayMs)
@@ -105,14 +107,16 @@ void DetectionVisualize::Show(const YOLOInferenceVisualize::FrameVisualize& yolo
             "Guide-light visualization lost empty/failed results");
     if (!emptyResults)
         require(!left.targets.front().success, "Failed detection displayed as successful");
+    return detectionKey;
 }
 
-void StereoscopicMeasurementVisualize::Show(const FrameVisualize& data, int delayMs)
+int StereoscopicMeasurementVisualize::Show(const FrameVisualize& data, int delayMs)
 {
     ++measurementShows;
     require(delayMs > 0, "Continuous measurement visualization must not block");
     require(guideShows == measurementShows, "Measurement shown before detection");
     require(data.targets.empty(), "Failed/empty detections created a false measurement");
+    return measurementKey;
 }
 
 int main(int argc, char** argv)
@@ -120,6 +124,11 @@ int main(int argc, char** argv)
     try {
         require(argc == 2, "Expected config path");
         DartCongfig config(argv[1]);
+        aim_base = true;
+        require(!handleAimModeKey(-1) && aim_base, "No key changed aim mode");
+        require(handleAimModeKey('2') && !aim_base, "2 did not select OUTPOST");
+        require(!handleAimModeKey('x') && !aim_base, "Unrelated key changed aim mode");
+        require(handleAimModeKey('1') && aim_base, "1 did not select BASE");
         // 已知3D点经过测距、镖口坐标转换，再送入独立显示接口。
         const cv::Point3d expectedRight(500, -800, 24000);
         const cv::Matx33d rotation = config.stereoscopicmeasurement.R;
@@ -163,7 +172,12 @@ int main(int argc, char** argv)
         for (bool empty : {false, true}) {
             reset();
             emptyResults = empty;
+            // 两个显示入口均可能消费按键，最终选择应遵循收到按键的先后顺序。
+            aim_base = empty;
+            detectionKey = empty ? '2' : '1';
+            measurementKey = empty ? '1' : '2';
             require(runCameraMode(config) == 0, "Camera mode did not stop normally");
+            require(aim_base == empty, "Visualization key did not update aim mode");
             require(yoloLoads == 1 && yoloCalls == 1 && detectionCalls == 1 && yoloShows == 1 && guideShows == 1
                     && measurementShows == 1,
                     "Perception/visualization not completed once");

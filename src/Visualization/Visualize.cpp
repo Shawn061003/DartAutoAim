@@ -185,20 +185,21 @@ cv::Mat drawStereo(const FrameVisualize& left, const FrameVisualize& right)
     return canvas;
 }
 
-void show(const char* title, const cv::Mat& canvas, int delay_ms)
+int show(const char* title, const cv::Mat& canvas, int delay_ms, bool closeOnKey = true)
 {
     if (delay_ms < 0) throw std::invalid_argument("Visualize delay_ms must be >= 0");
     cv::namedWindow(title, cv::WINDOW_NORMAL);
     cv::imshow(title, canvas);
     if (delay_ms > 0) {
-        cv::waitKey(delay_ms);
-        return;
+        return cv::waitKey(delay_ms);
     }
     // 图片模式由 HighGUI 处理事件并等待按键，保证窗口持续显示。
     // GTK3 的 WND_PROP_VISIBLE 返回 -1，不能用该属性作为进入等待的条件。
     // GTK3 也会在所有 HighGUI 窗口关闭后结束等待；此时返回值为 -1。
-    if (cv::waitKey(0) >= 0)
+    const int key = cv::waitKey(0);
+    if (key >= 0 && closeOnKey)
         cv::destroyWindow(title);
+    return key;
 }
 } // namespace
 
@@ -239,13 +240,13 @@ cv::Mat DetectionVisualize::Draw(const YOLOInferenceVisualize::FrameVisualize& y
     return canvas;
 }
 
-void DetectionVisualize::Show(const YOLOInferenceVisualize::FrameVisualize& yoloLeft,
+int DetectionVisualize::Show(const YOLOInferenceVisualize::FrameVisualize& yoloLeft,
                               const YOLOInferenceVisualize::FrameVisualize& yoloRight,
                               const GuideLightDetectVisualize::FrameVisualize& guideLeft,
                               const GuideLightDetectVisualize::FrameVisualize& guideRight,
                               int delay_ms)
 {
-    show("目标检测", Draw(yoloLeft, yoloRight, guideLeft, guideRight), delay_ms);
+    return show("目标检测", Draw(yoloLeft, yoloRight, guideLeft, guideRight), delay_ms, false);
 }
 
 namespace {
@@ -438,7 +439,7 @@ cv::Mat StereoscopicMeasurementVisualize::Draw(const FrameVisualize& data)
     return canvas;
 }
 
-void StereoscopicMeasurementVisualize::Show(const FrameVisualize& data, int delay_ms)
+int StereoscopicMeasurementVisualize::Show(const FrameVisualize& data, int delay_ms)
 {
-    show("空间定位", Draw(data), delay_ms);
+    return show("空间定位", Draw(data), delay_ms, false);
 }

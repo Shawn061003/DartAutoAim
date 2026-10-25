@@ -61,7 +61,8 @@ public:
                         const YOLOInferenceVisualize::FrameVisualize& yoloRight,
                         const GuideLightDetectVisualize::FrameVisualize& guideLeft,
                         const GuideLightDetectVisualize::FrameVisualize& guideRight);
-    static void Show(const YOLOInferenceVisualize::FrameVisualize& yoloLeft,
+    // 返回 waitKey 的键值，无按键/关闭全部窗口时为 -1；窗口生命周期由调用方管理。
+    static int Show(const YOLOInferenceVisualize::FrameVisualize& yoloLeft,
                      const YOLOInferenceVisualize::FrameVisualize& yoloRight,
                      const GuideLightDetectVisualize::FrameVisualize& guideLeft,
                      const GuideLightDetectVisualize::FrameVisualize& guideRight,
@@ -87,5 +88,6 @@ public:
     static MetricsVisualize Metrics(const cv::Point3d& position_m);
     // 左侧XY俯视、右侧YZ侧视；0.5m方格、等比例，镖口为唯一参考原点。
     static cv::Mat Draw(const FrameVisualize& data);
-    static void Show(const FrameVisualize& data, int delay_ms = 1);
+    // 返回 waitKey 的键值，供主程序处理模式切换；按键后保留窗口。
+    static int Show(const FrameVisualize& data, int delay_ms = 1);
 };

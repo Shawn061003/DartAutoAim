@@ -1,8 +1,26 @@
-// 输出合理的yaw角度
-// 分为两种情况，若接收到完整目标位置信息，则求解精确的yaw信息
-// 若此时相机只有一个看到了目标，则回退到粗求解yaw使两个相机都可以看到目标
+#include "Computation/YawSolver.h"
 
-/*
-输入：目标位置信息
-输出：目标角度差（弧度制）
-*/
+#include <cmath>
+
+std::optional<double> YawSolver::RunSolve(
+    const std::vector<LocationTransform::LocationTransformResult>& locations,
+    bool aim_base) const
+{
+    const auto targetName = aim_base ? TargetClasses::BASE : TargetClasses::OUTPOST;
+    for (const auto& location : locations) {
+        if (location.TargetName != targetName) continue;
+
+        const auto& point = location.RealLocation;
+        // 无效坐标或水平投影为零时，无法确定目标的水平方向。
+        if (!std::isfinite(point.x) || !std::isfinite(point.y) ||
+            !std::isfinite(point.z) || (point.x == 0.0 && point.y == 0.0)) {
+            return std::nullopt;
+        }
+
+        // 相对+Y轴计算：X向右，因此atan2(X, Y)满足右正左负。
+        return std::atan2(point.x, point.y);
+    }
+
+    // 所选类别缺失时，不切换目标，也不沿用上一帧结果。
+    return std::nullopt;
+}
