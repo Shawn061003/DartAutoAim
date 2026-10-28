@@ -87,6 +87,21 @@ struct LocationTransformParams {
     cv::Mat T;      // 右相机光心在镖口坐标系中的位置，3x1 CV_64F，毫米。
 };
 
+// 三维静态位置KF配置；单位均为mm²，Q按每次有效观测更新定义。
+// 零矩阵仅为待配置初值，不代表已完成噪声标定；使用前须配置并校验。
+// Q须对称半正定，R和P0须对称正定，所有元素须有限。
+struct KalmanFilterParams {
+    cv::Matx33d Q = cv::Matx33d::zeros();  // 过程噪声协方差。
+    cv::Matx33d R = cv::Matx33d::zeros();  // 测量噪声协方差。
+    cv::Matx33d P0 = cv::Matx33d::zeros(); // 初始化时的估计误差协方差。
+    int lostResetFrames = 5; // 当前所选目标连续缺失达到此帧数时重置。
+    int minAge = 10; // 最少有效观测数，初始化首帧计为1。
+    double maxYawErrorDeg = 0.05; // yaw标准差及残差均值投影的绝对值上限，单位度。
+    double maxNis = 11.345; // 三维创新NIS上限，暂取卡方分布3自由度的99%分位数。
+    double residualMeanAlpha = 0.2; // 创新残差均值的指数更新系数，范围(0,1]。
+    int stableFrames = 5; // 年龄、精度和残差条件连续满足的有效观测次数。
+};
+
 // 左右相机共用字段定义，各自保存一份参数；数值字段的初始值为待配置值。
 struct CameraParams {
     std::string deviceIp;       // 相机设备 IP，启用相机前填写
@@ -116,6 +131,7 @@ public:
     GuideLightParams guideLight;
     StereoscopicMeasurementParams stereoscopicmeasurement;
     LocationTransformParams locationTransform;
+    KalmanFilterParams kalmanFilter;
     
     // 类型别名便于调用方表达相机侧别，字段定义统一维护。
     using LeftCameraParams = CameraParams;

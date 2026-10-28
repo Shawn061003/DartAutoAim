@@ -181,7 +181,8 @@ if(DART_BUILD_MAIN)
         src/Visualization/VisualizeAdapter.cpp
         src/Computation/StereoscopicMeasurement.cpp
         src/Computation/LocationTransform.cpp
-        src/Computation/YawSolver.cpp)
+        src/Computation/YawSolver.cpp
+        src/Computation/KalmanFilter.cpp)
     # 默认配置定位到源码目录；模型和媒体路径由 YAML 所在目录解析。
     target_compile_definitions(dart_vision PRIVATE DART_PROJECT_ROOT="${CMAKE_CURRENT_SOURCE_DIR}")
     target_compile_options(dart_vision PRIVATE -Wall -Wextra -Wpedantic)
@@ -195,13 +196,20 @@ if(DART_BUILD_MAIN)
             src/Visualization/VisualizeAdapter.cpp
             src/Computation/StereoscopicMeasurement.cpp
             src/Computation/LocationTransform.cpp
-            src/Computation/YawSolver.cpp)
+            src/Computation/YawSolver.cpp
+            src/Computation/KalmanFilter.cpp)
         target_link_libraries(dart_camera_mode_test PRIVATE dart::config dart::acquisition dart::communication opencv_calib3d)
         target_compile_definitions(dart_camera_mode_test PRIVATE
             DART_PROJECT_ROOT="${CMAKE_CURRENT_SOURCE_DIR}")
         target_compile_options(dart_camera_mode_test PRIVATE -Wall -Wextra -Wpedantic)
         add_test(NAME camera_mode COMMAND dart_camera_mode_test ${CMAKE_CURRENT_SOURCE_DIR}/config/dart.yaml)
         set_tests_properties(camera_mode PROPERTIES TIMEOUT 15)
+
+        add_executable(dart_kalman_filter_test
+            tests/test_kalman_filter.cpp src/Computation/KalmanFilter.cpp)
+        target_link_libraries(dart_kalman_filter_test PRIVATE dart::config)
+        target_compile_options(dart_kalman_filter_test PRIVATE -Wall -Wextra -Wpedantic)
+        add_test(NAME kalman_filter COMMAND dart_kalman_filter_test)
 
         add_executable(dart_config_test tests/test_dart_config.cpp)
         target_link_libraries(dart_config_test PRIVATE dart::config)

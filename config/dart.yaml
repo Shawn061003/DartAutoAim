@@ -108,3 +108,28 @@ location_transform:
       cols: 1
       dt: d
       data: [ 240.0, -18.83, 231.45 ]
+
+# 三维静态位置KF；坐标为镖口X/Y/Z，协方差单位mm²，Q按每次有效更新定义。
+# 以下仅为接线用初值，尚未通过实测调参；Y为前向距离，暂设更大的测量方差。
+kalman_filter:
+   lost_reset_frames: 5
+   min_age: 10
+   max_yaw_error_deg: 0.05 # yaw标准差与残差均值角度投影门限，不是硬误差界。
+   max_nis: 11.345
+   residual_mean_alpha: 0.2
+   stable_frames: 5 # 年龄>=10且其余条件满足后连续计数，最早第14次观测放行。
+   Q: !!opencv-matrix
+      rows: 3
+      cols: 3
+      dt: d
+      data: [ 1., 0., 0., 0., 1., 0., 0., 0., 1. ]
+   R: !!opencv-matrix
+      rows: 3
+      cols: 3
+      dt: d
+      data: [ 100., 0., 0., 0., 10000., 0., 0., 0., 100. ]
+   P0: !!opencv-matrix
+      rows: 3
+      cols: 3
+      dt: d
+      data: [ 100., 0., 0., 0., 10000., 0., 0., 0., 100. ]

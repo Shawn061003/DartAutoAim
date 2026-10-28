@@ -1,5 +1,6 @@
 #include "common/DartConfig.h"
 
+#include <algorithm>
 #include <cmath>
 #include <filesystem>
 #include <limits>
@@ -226,6 +227,41 @@ LocationTransformParams readLocationTransform(const cv::FileNode& node)
     return result;
 }
 
+KalmanFilterParams readKalmanFilter(const cv::FileNode& node)
+{
+    const auto covariance = [&](const char* key, bool positiveDefinite) {
+        const cv::Mat matrix = readMatrix(node, key, "kalman_filter");
+        const std::string field = std::string("kalman_filter.") + key;
+        if (matrix.rows != 3 || matrix.cols != 3)
+            invalid(field, "expected a 3x3 covariance matrix");
+        const double tolerance = 1e-10 * std::max(1.0, cv::norm(matrix, cv::NORM_INF));
+        if (cv::norm(matrix - matrix.t(), cv::NORM_INF) > tolerance)
+            invalid(field, "expected a symmetric covariance matrix");
+        const cv::Mat symmetric = (matrix + matrix.t()) * 0.5;
+        cv::Mat eigenvalues;
+        if (!cv::eigen(symmetric, eigenvalues)) invalid(field, "cannot compute covariance eigenvalues");
+        const double minimum = eigenvalues.at<double>(2);
+        if (positiveDefinite ? minimum <= 0.0 : minimum < 0.0)
+            invalid(field, positiveDefinite ? "expected a positive definite matrix"
+                                           : "expected a positive semidefinite matrix");
+        return cv::Matx33d(symmetric);
+    };
+    KalmanFilterParams result;
+    result.Q = covariance("Q", false);
+    result.R = covariance("R", true);
+    result.P0 = covariance("P0", true);
+    result.lostResetFrames = readInteger(node, "lost_reset_frames", "kalman_filter", 1);
+    result.minAge = readInteger(node, "min_age", "kalman_filter", 1);
+    result.maxYawErrorDeg = readNumber(node, "max_yaw_error_deg", "kalman_filter", 180.0);
+    result.maxNis = readNumber(node, "max_nis", "kalman_filter", std::numeric_limits<double>::max());
+    result.residualMeanAlpha = readNumber(node, "residual_mean_alpha", "kalman_filter", 1.0);
+    result.stableFrames = readInteger(node, "stable_frames", "kalman_filter", 1);
+    if (result.maxYawErrorDeg <= 0.0) invalid("kalman_filter.max_yaw_error_deg", "expected a positive value");
+    if (result.maxNis <= 0.0) invalid("kalman_filter.max_nis", "expected a positive value");
+    if (result.residualMeanAlpha <= 0.0) invalid("kalman_filter.residual_mean_alpha", "expected a value in (0,1]");
+    return result;
+}
+
 } // namespace
 
 DartCongfig::DartCongfig(const std::string& configPath)
@@ -250,6 +286,7 @@ void DartCongfig::load(const std::string& configPath)
         auto nextGuideLight = readGuideLight(section(root, "guide_light"));
         auto nextStereoscopicMeasurement = readStereoscopicMeasurement(section(root,"stereo_calibration"));
         auto nextLocationTransform = readLocationTransform(section(root, "location_transform"));
+        auto nextKalmanFilter = readKalmanFilter(section(root, "kalman_filter"));
 
         // 全部板块校验通过后提交，任何解析错误都保留之前的配置。
         input = std::move(nextInput);
@@ -261,6 +298,7 @@ void DartCongfig::load(const std::string& configPath)
         guideLight = nextGuideLight;
         stereoscopicmeasurement = std::move(nextStereoscopicMeasurement);
         locationTransform = std::move(nextLocationTransform);
+        kalmanFilter = nextKalmanFilter;
     } catch (const std::exception& error) {
         throw std::runtime_error("DartCongfig [" + configPath + "]: " + error.what());
     }

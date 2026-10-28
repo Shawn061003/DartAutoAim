@@ -15,6 +15,7 @@
 #include "Perception/GuideLightDetect.h"
 #include "Computation/StereoscopicMeasurement.h"
 #include "Computation/LocationTransform.h"
+#include "Computation/KalmanFilter.h"
 #include "Computation/YawSolver.h"
 #include "Communication/Communication.hpp"
 #include "Visualization/VisualizeAdapter.h"
@@ -201,6 +202,30 @@ std::optional<dart_mcu::ReceivedStatus> checkSendConditions(
 }
 
 // ----------------------------------------------------------------
+// 当前目标滤波：按aim_base选择测量，连续缺失达到阈值时清除KF历史
+// ----------------------------------------------------------------
+// 每对已处理双帧调用一次；不以空轮询计数，也不在目标缺失时输出旧位置。
+std::optional<DartKalmanFilter::KalmanFilterResult> filterSelectedTarget(
+    const std::vector<LocationTransform::LocationTransformResult>& locations,
+    DartKalmanFilter& kalmanFilter, int& lostFrames, int lostResetFrames, bool canUpdate)
+{
+    const auto targetName = aim_base ? TargetClasses::BASE : TargetClasses::OUTPOST;
+    const auto target = std::find_if(locations.begin(), locations.end(),
+        [targetName](const auto& location) { return location.TargetName == targetName; });
+    if (target == locations.end()) {
+        kalmanFilter.InvalidateStability();
+        // 计数达到阈值后保持饱和，仅在首次达到阈值时重置。
+        if (lostFrames < lostResetFrames && ++lostFrames == lostResetFrames)
+            kalmanFilter.Reset();
+        return std::nullopt;
+    }
+
+    lostFrames = 0;
+    if (!canUpdate) return std::nullopt;
+    return kalmanFilter.RunKalmanFilter(*target);
+}
+
+// ----------------------------------------------------------------
 // 图片模式：处理单对图片，显示结果并等待退出
 // ----------------------------------------------------------------
 int runImageMode(const DartCongfig& config)
@@ -260,7 +285,7 @@ int runCameraMode(const DartCongfig& config)
     StereoFrameQueue& frames = input.frameQueue();
 
     // ----------------------------------------------------------------
-    // step2  初始化检测、测距、坐标转换和 yaw 解算模块
+    // step2  初始化检测、测距、坐标转换、KF和 yaw 解算模块
     // ----------------------------------------------------------------
     // 模型仅在此处加载、预热一次，完成初始化后再启动相机。
     std::cout << "Loading camera perception on " << config.yolo.device << "...\n" << std::flush;
@@ -269,6 +294,10 @@ int runCameraMode(const DartCongfig& config)
     StereoscopicMeasurement stereoscopicmeasurement(config.leftCamera, config.rightCamera, config.stereoscopicmeasurement.R, config.stereoscopicmeasurement.T);
     LocationTransform locationtransform(config.locationTransform.R, config.locationTransform.T);
     YawSolver yawsolver;
+    DartKalmanFilter kalmanFilter(config.kalmanFilter);
+    int kalmanLostFrames = 0;
+    auto kalmanCommandAt = lastCommandAt;
+    auto kalmanAimRevision = aimRevision;
 
     // ----------------------------------------------------------------
     // step3  启动双相机采集
@@ -278,7 +307,7 @@ int runCameraMode(const DartCongfig& config)
     input.StartCamera();
     std::cout << "Camera perception started. Press Ctrl+C to stop.\n" << std::flush;
 
-    // 持续执行 step4～step11，直到收到退出信号。
+    // 持续执行 step4～step12，直到收到退出信号。
     while (!stopSignals.stopRequested()) {
         // ----------------------------------------------------------------
         // step4  检查通信并处理待发送的预瞄准
@@ -323,41 +352,70 @@ int runCameraMode(const DartCongfig& config)
         const auto locations = locationtransform.RunTransform(measurements);
 
         // ----------------------------------------------------------------
-        // step9  根据搜索或测距结果生成本帧 yaw
+        // step9  卡尔曼滤波定位
+        // ----------------------------------------------------------------
+        // 切换目标或下发运动命令后，旧位置不再属于当前观测上下文。
+        if (kalmanCommandAt != lastCommandAt || kalmanAimRevision != aimRevision) {
+            kalmanFilter.Reset();
+            kalmanLostFrames = 0;
+            kalmanCommandAt = lastCommandAt;
+            kalmanAimRevision = aimRevision;
+        }
+        bool canUpdateKalman = !preAimPending && frameAimRevision == aimRevision;
+        if (communication) {
+            const auto motor = communication->latestStatus(
+                std::chrono::milliseconds(config.communication.statusMaxAgeMs));
+            const auto commandMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                lastCommandAt.time_since_epoch()).count();
+            canUpdateKalman = canUpdateKalman && motor && motor->status.is_stationary == 1 &&
+                motor->received_at > lastCommandAt && frame->left.timestamp_ms > commandMs &&
+                frame->right.timestamp_ms > commandMs;
+        }
+        // 镖架运动、状态未知或图像已过时，不融合该帧，避免历史跨坐标系累积。
+        if (!canUpdateKalman) kalmanFilter.Reset();
+        const auto filteredTarget = filterSelectedTarget(locations, kalmanFilter,
+            kalmanLostFrames, config.kalmanFilter.lostResetFrames, canUpdateKalman);
+        std::vector<LocationTransform::LocationTransformResult> filteredLocations;
+        if (filteredTarget)
+            filteredLocations.push_back({filteredTarget->XkHat, filteredTarget->TargetName});
+
+        // ----------------------------------------------------------------
+        // step10  根据搜索或滤波结果生成本帧 yaw
         // ----------------------------------------------------------------
         // 目标缺失时不生成yaw，最终发送条件由checkSendConditions统一检查。
         std::optional<double> yaw;
         if (needSearch) {
             const double searchYaw = yawsolver.RunSearch(detections.left);
             if (searchYaw != 0.0) yaw = searchYaw;
-        } else {
-            yaw = yawsolver.RunSolve(locations, aim_base);
+        } else if (filteredTarget) {
+            yaw = yawsolver.RunSolve(filteredLocations, aim_base);
             if (yaw)
                 std::printf("[YawSolver] target at %.6f deg, requested yaw %+.6f deg\n",
                             (current_angle + *yaw) * 180.0 / CV_PI, *yaw * 180.0 / CV_PI);
         }
 
         // ----------------------------------------------------------------
-        // step10  刷新空间位置显示，并检查退出信号
+        // step11  刷新空间位置显示，并检查退出信号
         // ----------------------------------------------------------------
-        // 搜索或测距无结果时显示空面板，清除上一帧位置。
+        // 只显示当前所选目标的KF输出；本帧无滤波结果时清空，不显示原始或历史位置。
         // 窗口事件和目标切换统一在 processFrame 中处理。
-        visualization::showLocations(locations, -1);
+        visualization::showLocations(filteredLocations, -1);
         if (stopSignals.stopRequested()) break;
 
         // ----------------------------------------------------------------
-        // step11  最终检查通信状态，发送 yaw 并记录命令
+        // step12  最终检查通信状态，发送 yaw 并记录命令
         // ----------------------------------------------------------------
         // 发送前再次校验回传有效期、镖架状态及数据时序，成功后记录序号和时间。
         const auto status = checkSendConditions(yaw, *frame, frameAimRevision, config.communication);
-        if (status) {
+        // 视觉精调须通过KF门控；搜索分支没有三维观测，仍使用原有发送条件。
+        if (status && (needSearch || (filteredTarget && filteredTarget->stable))) {
             // yaw 单位 rad、右正左负；本阶段开火许可与伸缩目标均为 0。
             sendYawCommand(*yaw, *status, config.communication);
         }
     }
 
     // ----------------------------------------------------------------
-    // step12  停止双相机采集并结束本次运行
+    // step13  停止双相机采集并结束本次运行
     // ----------------------------------------------------------------
     // 正常退出显式停止；异常路径由CameraInput析构完成设备清理。
     input.StopCamera();

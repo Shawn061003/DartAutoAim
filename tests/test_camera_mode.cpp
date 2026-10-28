@@ -18,6 +18,7 @@ int detectionKey = -1, measurementKey = -1;
 bool active = false, failStart = false, failDetection = false, emptyResults = false;
 bool controlRun = false;
 float controlMotionPerFrame = 0;
+int controlFrameLimit = 2;
 StereoFrameQueue* controlQueue = nullptr;
 GuideLightDetect::StereoDetectResult controlDetections;
 
@@ -108,6 +109,56 @@ public:
 private:
     int master_ = -1;
 };
+
+void testSelectedTargetFilter()
+{
+    KalmanFilterParams params;
+    params.Q = cv::Matx33d::eye();
+    params.R = cv::Matx33d::eye() * 4.0;
+    params.P0 = cv::Matx33d::eye() * 9.0;
+    DartKalmanFilter kf(params);
+    int lostFrames = 0;
+    LocationTransform::LocationTransformResult base{{10, 20, 30}, TargetClasses::BASE};
+    LocationTransform::LocationTransformResult outpost{{100, 200, 300}, TargetClasses::OUTPOST};
+    aim_base = true;
+    auto filtered = filterSelectedTarget({outpost, base}, kf, lostFrames, 5, true);
+    require(filtered && filtered->TargetName == TargetClasses::BASE &&
+            filtered->XkHat == base.RealLocation, "KF selected wrong target or depended on ordering");
+    base.RealLocation = {24, 34, 44};
+    filtered = filterSelectedTarget({outpost, base}, kf, lostFrames, 5, true);
+    require(filtered && cv::norm(filtered->XkHat - cv::Point3d(20, 30, 40)) < 1e-10,
+            "Selected target did not use filtered coordinates");
+
+    for (int i = 1; i <= 4; ++i) {
+        require(!filterSelectedTarget({outpost}, kf, lostFrames, 5, true) && lostFrames == i,
+                "Another target hid the selected target loss or returned stale coordinates");
+    }
+    base.RealLocation = {38, 48, 58};
+    filtered = filterSelectedTarget({base}, kf, lostFrames, 5, true);
+    require(filtered && lostFrames == 0 && filtered->XkHat.x > 20 && filtered->XkHat.x < 38,
+            "Short loss reset KF history or failed to clear the loss counter");
+    for (int i = 1; i <= 5; ++i)
+        require(!filterSelectedTarget({}, kf, lostFrames, 5, true) && lostFrames == i,
+                "Continuous loss did not reach reset threshold");
+    base.RealLocation = {70, 80, 90};
+    filtered = filterSelectedTarget({base}, kf, lostFrames, 5, true);
+    require(filtered && filtered->XkHat == base.RealLocation && lostFrames == 0,
+            "KF did not reinitialize immediately after five missing frames");
+
+    aim_base = false;
+    filtered = filterSelectedTarget({base, outpost}, kf, lostFrames, 5, true);
+    require(filtered && filtered->TargetName == TargetClasses::OUTPOST &&
+            filtered->XkHat == outpost.RealLocation, "OUTPOST reused BASE filter history");
+    for (int i = 0; i < 20; ++i)
+        require(!filterSelectedTarget({base}, kf, lostFrames, 5, true), "Missing OUTPOST returned BASE");
+    require(lostFrames == 5, "Loss count did not saturate");
+    require(!filterSelectedTarget({outpost}, kf, lostFrames, 5, false) && lostFrames == 0,
+            "Disallowed frame updated KF or counted visible target as missing");
+    filtered = filterSelectedTarget({outpost}, kf, lostFrames, 5, true);
+    require(filtered && filtered->XkHat == outpost.RealLocation,
+            "Disallowed measurement polluted KF history");
+    aim_base = true;
+}
 
 void testYawAngleLimit()
 {
@@ -285,7 +336,7 @@ GuideLightDetect::StereoDetectResult GuideLightDetect::RunDetection(
         require(rois.left.at(0).frame_id == left.frame_id && rois.right.at(0).frame_id == right.frame_id,
                 "YOLO results were not forwarded to traditional vision");
     // 用真实退出信号验证本次检测完成后正常退出；FAILED 和空集合均不能阻碍退出。
-    if (!controlRun || detectionCalls == 2) std::raise(SIGINT);
+    if (!controlRun || detectionCalls == controlFrameLimit) std::raise(SIGINT);
     if (controlRun) {
         auto detections = controlDetections;
         for (auto& d : detections.left) {
@@ -343,8 +394,13 @@ int StereoscopicMeasurementVisualize::Show(const FrameVisualize& data, int delay
     require(delayMs == -1, "Measurement visualization must not read keyboard input");
     require(guideShows == measurementShows, "Measurement shown before detection");
     if (controlRun) {
-        require(data.targets.size() == 1, "Control target was not measured");
-        if (measurementShows == 1) {
+        const auto motor = communication->latestStatus(
+            std::chrono::milliseconds(communicationParams.statusMaxAgeMs));
+        const bool hasFilteredTarget = motor && motor->status.is_stationary == 1 &&
+            motor->received_at > lastCommandAt;
+        require(data.targets.size() == (hasFilteredTarget ? 1u : 0u),
+                "Location display used raw or stale data without a current KF result");
+        if (measurementShows < controlFrameLimit) {
             std::this_thread::sleep_for(std::chrono::milliseconds(2));
             const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -364,6 +420,7 @@ int main(int argc, char** argv)
         require(argc == 2, "Expected config path");
         testYawAngleLimit();
         testAimControl();
+        testSelectedTargetFilter();
         require(communication == nullptr && !preAimPending, "Control session leaked state");
         DartCongfig config(argv[1]);
         aim_base = true;
@@ -414,14 +471,24 @@ int main(int argc, char** argv)
         for (int scenario = 0; scenario < 4; ++scenario) {
             const bool stationary = scenario != 0;
             controlMotionPerFrame = scenario == 2 ? 0.8f : 0.1f;
-            auto latest = synthetic;
-            for (auto& d : latest.left) d.CenterPoint.x += controlMotionPerFrame;
-            for (auto& d : latest.right) d.CenterPoint.x += controlMotionPerFrame;
-            auto expectedEstimator = StereoscopicMeasurement(config.leftCamera, config.rightCamera,
-                config.stereoscopicmeasurement.R, config.stereoscopicmeasurement.T);
-            const auto expectedYaw = YawSolver{}.RunSolve(
-                actualTransform.RunTransform(expectedEstimator.RunMeasurement(latest)), true);
-            require(expectedYaw.has_value(), "Synthetic control yaw missing");
+            // 模拟同样的连续观测，确定门控放行时应发送的滤波yaw。
+            controlFrameLimit = config.kalmanFilter.minAge + config.kalmanFilter.stableFrames;
+            DartKalmanFilter expectedFilter(config.kalmanFilter);
+            std::optional<double> expectedYaw;
+            for (int frame = 1; frame < controlFrameLimit; ++frame) {
+                auto latest = synthetic;
+                for (auto& d : latest.left) d.CenterPoint.x += controlMotionPerFrame*frame;
+                for (auto& d : latest.right) d.CenterPoint.x += controlMotionPerFrame*frame;
+                const auto expectedLocations = actualTransform.RunTransform(estimator.RunMeasurement(latest));
+                require(expectedLocations.size() == 1, "Synthetic KF target missing");
+                const auto filtered = expectedFilter.RunKalmanFilter(expectedLocations.front());
+                if (filtered.stable) {
+                    expectedYaw = YawSolver{}.RunSolve({{filtered.XkHat, filtered.TargetName}}, true);
+                    break;
+                }
+            }
+            if (scenario == 1 || scenario == 3)
+                require(expectedYaw.has_value(), "Stationary synthetic target did not pass KF gate");
             reset();
             controlRun = true;
             ControlMcu mcu;
@@ -440,8 +507,8 @@ int main(int argc, char** argv)
             lastCommandAt = {};
             mcu.publish(stationary);
             require(runCameraMode(config) == 0, "Control camera run failed");
-            // 镖架静止时，灯点逐帧移动也直接使用当前测量，不再等待判稳。
-            if (scenario == 1 || scenario == 2) {
+            // 仅镖架静止且KF稳定时发送，不能在首次初始化后提前下发。
+            if (stationary && scenario != 3 && expectedYaw) {
                 mcu.expectCommand(*expectedYaw);
                 require(std::abs(current_angle - (initialAngle + *expectedYaw)) < 1e-12,
                         "Visual correction was not accumulated in current angle");
@@ -453,7 +520,7 @@ int main(int argc, char** argv)
                 require(std::abs(current_angle - outpostAngle) < 1e-12,
                         "Pre-aim switch ignored previous visual correction");
             } else {
-                require(!mcu.hasCommand(), "Moving launcher or over-limit angle allowed yaw command");
+                require(!mcu.hasCommand(), "Moving launcher, unstable KF or over-limit angle allowed yaw command");
                 require(current_angle == initialAngle, "Blocked yaw changed current angle");
             }
             communication.reset();
