@@ -18,8 +18,6 @@ int detectionKey = -1, measurementKey = -1;
 bool active = false, failStart = false, failDetection = false, emptyResults = false;
 bool controlRun = false;
 float controlMotionPerFrame = 0;
-class ControlMcu;
-ControlMcu* controlMcu = nullptr;
 StereoFrameQueue* controlQueue = nullptr;
 GuideLightDetect::StereoDetectResult controlDetections;
 
@@ -110,31 +108,6 @@ public:
 private:
     int master_ = -1;
 };
-
-void testBaseReadyToAim()
-{
-    StereoFrame frame;
-    LocationTransform::LocationTransformResult base;
-    base.TargetName = TargetClasses::BASE;
-    base.stable = true;
-    std::optional<std::int64_t> confirmedAt;
-    require(!canAimAtBase({base}, frame, confirmedAt) && confirmedAt,
-            "First stable result must only record confirmation time");
-    frame.left.timestamp_ms = *confirmedAt;
-    frame.right.timestamp_ms = *confirmedAt + 1;
-    require(!canAimAtBase({base}, frame, confirmedAt), "Stale left frame allowed aiming");
-    std::swap(frame.left.timestamp_ms, frame.right.timestamp_ms);
-    require(!canAimAtBase({base}, frame, confirmedAt), "Stale right frame allowed aiming");
-    frame.left.timestamp_ms = frame.right.timestamp_ms = *confirmedAt + 1;
-    require(canAimAtBase({base}, frame, confirmedAt), "Fresh stable stereo pair was rejected");
-    base.stable = false;
-    require(!canAimAtBase({base}, frame, confirmedAt) && !confirmedAt,
-            "Unstable BASE retained confirmation time");
-    base.stable = true;
-    require(!canAimAtBase({base}, frame, confirmedAt), "BASE restabilization reused old confirmation");
-    require(!canAimAtBase({}, frame, confirmedAt) && !confirmedAt,
-            "Missing BASE retained confirmation time");
-}
 
 void testYawAngleLimit()
 {
@@ -312,7 +285,7 @@ GuideLightDetect::StereoDetectResult GuideLightDetect::RunDetection(
         require(rois.left.at(0).frame_id == left.frame_id && rois.right.at(0).frame_id == right.frame_id,
                 "YOLO results were not forwarded to traditional vision");
     // 用真实退出信号验证本次检测完成后正常退出；FAILED 和空集合均不能阻碍退出。
-    if (!controlRun || detectionCalls == 7) std::raise(SIGINT);
+    if (!controlRun || detectionCalls == 2) std::raise(SIGINT);
     if (controlRun) {
         auto detections = controlDetections;
         for (auto& d : detections.left) {
@@ -371,9 +344,7 @@ int StereoscopicMeasurementVisualize::Show(const FrameVisualize& data, int delay
     require(guideShows == measurementShows, "Measurement shown before detection");
     if (controlRun) {
         require(data.targets.size() == 1, "Control target was not measured");
-        if (measurementShows <= 6)
-            require(!controlMcu->hasCommand(), "BASE sent before five observations and a subsequent fresh frame");
-        if (measurementShows < 7) {
+        if (measurementShows == 1) {
             std::this_thread::sleep_for(std::chrono::milliseconds(2));
             const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -391,7 +362,6 @@ int main(int argc, char** argv)
 {
     try {
         require(argc == 2, "Expected config path");
-        testBaseReadyToAim();
         testYawAngleLimit();
         testAimControl();
         require(communication == nullptr && !preAimPending, "Control session leaked state");
@@ -445,8 +415,8 @@ int main(int argc, char** argv)
             const bool stationary = scenario != 0;
             controlMotionPerFrame = scenario == 2 ? 0.8f : 0.1f;
             auto latest = synthetic;
-            for (auto& d : latest.left) d.CenterPoint.x += controlMotionPerFrame*6;
-            for (auto& d : latest.right) d.CenterPoint.x += controlMotionPerFrame*6;
+            for (auto& d : latest.left) d.CenterPoint.x += controlMotionPerFrame;
+            for (auto& d : latest.right) d.CenterPoint.x += controlMotionPerFrame;
             auto expectedEstimator = StereoscopicMeasurement(config.leftCamera, config.rightCamera,
                 config.stereoscopicmeasurement.R, config.stereoscopicmeasurement.T);
             const auto expectedYaw = YawSolver{}.RunSolve(
@@ -455,14 +425,13 @@ int main(int argc, char** argv)
             reset();
             controlRun = true;
             ControlMcu mcu;
-            controlMcu = &mcu;
             communicationParams = config.communication;
             communication = std::make_unique<dart_mcu::Communication>();
             communication->start(mcu.port, communicationParams.baud);
             requestedAim.reset();
             preAimPending = false;
             aim_base = true;
-            // 第4种场景：灯已稳定、镖架静止，但本次视觉精调会使累计角度超过17度。
+            // 第4种场景：镖架静止，但本次视觉精调会使累计角度超过17度。
             const double initialAngle = scenario == 3 ? 16.0 * CV_PI / 180.0 : std::atan(4.0 / 482.5);
             if (scenario == 3)
                 require(initialAngle + *expectedYaw > 17.0 * CV_PI / 180.0, "Fixture does not cross angle limit");
@@ -471,7 +440,8 @@ int main(int argc, char** argv)
             lastCommandAt = {};
             mcu.publish(stationary);
             require(runCameraMode(config) == 0, "Control camera run failed");
-            if (scenario == 1) {
+            // 镖架静止时，灯点逐帧移动也直接使用当前测量，不再等待判稳。
+            if (scenario == 1 || scenario == 2) {
                 mcu.expectCommand(*expectedYaw);
                 require(std::abs(current_angle - (initialAngle + *expectedYaw)) < 1e-12,
                         "Visual correction was not accumulated in current angle");
@@ -483,10 +453,9 @@ int main(int argc, char** argv)
                 require(std::abs(current_angle - outpostAngle) < 1e-12,
                         "Pre-aim switch ignored previous visual correction");
             } else {
-                require(!mcu.hasCommand(), "Moving launcher/BASE or over-limit angle allowed yaw command");
+                require(!mcu.hasCommand(), "Moving launcher or over-limit angle allowed yaw command");
                 require(current_angle == initialAngle, "Blocked yaw changed current angle");
             }
-            controlMcu = nullptr;
             communication.reset();
             controlRun = false;
         }

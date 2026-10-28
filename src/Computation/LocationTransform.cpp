@@ -11,7 +11,7 @@ std::vector<LocationTransform::LocationTransformResult> LocationTransform::RunTr
                               rightCameraToDartTmm_.at<double>(2, 0));
     for (const auto& result : results) {
         const cv::Vec3d point(result.RealLocation.x, result.RealLocation.y, result.RealLocation.z);
-        transformed.push_back({cv::Point3d(rotation * point + translation), result.TargetName, result.stable});
+        transformed.push_back({cv::Point3d(rotation * point + translation), result.TargetName});
     }
     return transformed;
 }

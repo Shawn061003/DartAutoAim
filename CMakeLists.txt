@@ -203,14 +203,6 @@ if(DART_BUILD_MAIN)
         add_test(NAME camera_mode COMMAND dart_camera_mode_test ${CMAKE_CURRENT_SOURCE_DIR}/config/dart.yaml)
         set_tests_properties(camera_mode PROPERTIES TIMEOUT 15)
 
-        add_executable(dart_stereoscopic_stability_test
-            tests/test_stereoscopic_stability.cpp
-            src/Computation/StereoscopicMeasurement.cpp
-            src/Computation/LocationTransform.cpp)
-        target_link_libraries(dart_stereoscopic_stability_test PRIVATE dart::config opencv_calib3d)
-        target_compile_options(dart_stereoscopic_stability_test PRIVATE -Wall -Wextra -Wpedantic)
-        add_test(NAME stereoscopic_stability COMMAND dart_stereoscopic_stability_test)
-
         add_executable(dart_config_test tests/test_dart_config.cpp)
         target_link_libraries(dart_config_test PRIVATE dart::config)
         add_test(NAME dart_config COMMAND dart_config_test

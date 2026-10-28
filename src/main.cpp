@@ -4,7 +4,7 @@
 // main：读取配置并分派 image / camera 模式，统一处理退出和异常。
 // processFrame：两种模式共用的 YOLO → 引导灯检测 → 显示/按键流程。
 // runImageMode / runCameraMode：分别组织单对图片处理和持续相机处理。
-// checkSendConditions / canAimAtBase：分别负责发送前检查和BASE稳定后新帧放行。
+// checkSendConditions：负责发送前的电控状态和帧时序检查。
 
 #include "common/DartConfig.h"
 #include "Acquisition/VideoInput.h"
@@ -21,6 +21,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
 #include <exception>
 #include <filesystem>
 #include <iostream>
@@ -187,7 +188,6 @@ std::optional<dart_mcu::ReceivedStatus> checkSendConditions(
         lastCommandAt.time_since_epoch()).count();
 
     // step4  发送前再次确认镖架静止、回传未被复用、图像晚于上一条命令。
-    // 这里检查的是镖架状态；场地BASE灯的稳定性由上游UpdateStability单独判断。
     if (!status ||                              // 没有有效且未过期的电控状态，当前运动状态未知。
         status->status.is_stationary != 1 ||     // 电控报告镖架移动中，暂停发送调整。
         status->sequence <= lastCommandStatusSequence || // 回传已用于之前的发送，避免重复使用。
@@ -198,34 +198,6 @@ std::optional<dart_mcu::ReceivedStatus> checkSendConditions(
 
     // step5  返回本次放行所用的回传，供调用方成功发送后记录。
     return status;
-}
-
-// ----------------------------------------------------------------
-// BASE精调放行：稳定标签成立后，继续等待确认时刻之后的新双帧
-// ----------------------------------------------------------------
-// 不在这里重复计算2px位移；stable由测距模块提供，此处只维护stableConfirmedAtMs。
-bool canAimAtBase(const std::vector<LocationTransform::LocationTransformResult>& locations,
-                  const StereoFrame& frame, std::optional<std::int64_t>& stableConfirmedAtMs)
-{
-    // step1  按类别寻找BASE，避免依赖结果数组顺序。
-    const auto base = std::find_if(locations.begin(), locations.end(), [](const auto& location) {
-        return location.TargetName == TargetClasses::BASE;
-    });
-    // step2  目标丢失或重新运动时，撤销之前的稳定确认时刻。
-    if (base == locations.end() || !base->stable) {
-        stableConfirmedAtMs.reset();
-        return false;
-    }
-
-    // step3  首次判稳只记录当前确认时刻，本帧不放行。
-    if (!stableConfirmedAtMs) {
-        stableConfirmedAtMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now().time_since_epoch()).count();
-        return false; // 首次判稳只记录时刻，不能使用确认之前采集的图像。
-    }
-
-    // step4  后续仍稳定时，要求左右图都在确认之后采集；使用较早一侧进行检查。
-    return std::min(frame.left.timestamp_ms, frame.right.timestamp_ms) > *stableConfirmedAtMs;
 }
 
 // ----------------------------------------------------------------
@@ -258,7 +230,7 @@ int runImageMode(const DartCongfig& config)
     // ----------------------------------------------------------------
     // step3  完成检测、双目测距和镖口坐标转换
     // ----------------------------------------------------------------
-    // 单张图片只输出测距结果，不能积累用于BASE判稳的五次连续观测。
+    // 使用本帧检测结果完成双目测距和坐标转换。
     const auto detections = processFrame(*frame, yolo, guideLight);
     std::cout << "Visual detection completed: left_frame=" << frame->left.frame_id
               << " right_frame=" << frame->right.frame_id << '\n';
@@ -275,7 +247,7 @@ int runImageMode(const DartCongfig& config)
 }
 
 // ----------------------------------------------------------------
-// 相机模式：持续采集，按观察资格 → 稳定性 → yaw放行的顺序处理
+// 相机模式：持续采集，完成检测、测距、yaw解算和发送检查
 // ----------------------------------------------------------------
 int runCameraMode(const DartCongfig& config)
 {
@@ -299,33 +271,17 @@ int runCameraMode(const DartCongfig& config)
     YawSolver yawsolver;
 
     // ----------------------------------------------------------------
-    // step3  准备本轮观察状态和稳定性清理操作
-    // ----------------------------------------------------------------
-    // 分别保存镖架静止边界、BASE稳定确认时刻以及目标/命令版本。
-    std::optional<std::int64_t> stationaryAfterMs;
-    std::optional<std::int64_t> baseStableAfterMs;
-    auto observationCommandAt = lastCommandAt;
-    auto observationAimRevision = aimRevision;
-    const auto milliseconds = [](auto time) {
-        return std::chrono::duration_cast<std::chrono::milliseconds>(time.time_since_epoch()).count();
-    };
-    const auto resetStability = [&] {
-        stereoscopicmeasurement.ResetStability();
-        baseStableAfterMs.reset();
-    };
-
-    // ----------------------------------------------------------------
-    // step4  启动双相机采集
+    // step3  启动双相机采集
     // ----------------------------------------------------------------
     // 初始化期间已收到退出信号时，直接结束，不再启动设备。
     if (stopSignals.stopRequested()) return 0;
     input.StartCamera();
     std::cout << "Camera perception started. Press Ctrl+C to stop.\n" << std::flush;
 
-    // 持续执行 step5～step14，直到收到退出信号。
+    // 持续执行 step4～step11，直到收到退出信号。
     while (!stopSignals.stopRequested()) {
         // ----------------------------------------------------------------
-        // step5  检查通信并处理待发送的预瞄准
+        // step4  检查通信并处理待发送的预瞄准
         // ----------------------------------------------------------------
         // 串口故障中止运行；暂时没有图像时，也继续处理预瞄准请求。
         if (communication && !communication->isRunning())
@@ -333,34 +289,7 @@ int runCameraMode(const DartCongfig& config)
         handleAimModeKey(-1);
 
         // ----------------------------------------------------------------
-        // step6  目标或运动命令变化时，开启新一轮观察
-        // ----------------------------------------------------------------
-        // 清空旧的稳定性记录和静止边界，更新当前观察对应的版本。
-        if (lastCommandAt != observationCommandAt || aimRevision != observationAimRevision) {
-            resetStability();
-            stationaryAfterMs.reset();
-            observationCommandAt = lastCommandAt;
-            observationAimRevision = aimRevision;
-        }
-
-        // ----------------------------------------------------------------
-        // step7  确认镖架静止，记录允许使用图像的时间边界
-        // ----------------------------------------------------------------
-        // 移动中、状态未知或回传早于本轮命令时，清空观察状态。
-        if (communication) {
-            const auto motor = communication->latestStatus(
-                std::chrono::milliseconds(config.communication.statusMaxAgeMs));
-            if (!motor || motor->status.is_stationary != 1 || motor->received_at <= lastCommandAt) {
-                resetStability();
-                stationaryAfterMs.reset();
-            } else if (!stationaryAfterMs) {
-                // 仅在本轮首次确认静止时记录边界，后续心跳不持续推迟它。
-                stationaryAfterMs = milliseconds(motor->received_at);
-            }
-        }
-
-        // ----------------------------------------------------------------
-        // step8  从队列取得时间配对的左右双帧
+        // step5  从队列取得时间配对的左右双帧
         // ----------------------------------------------------------------
         // 每次仅尝试一次配对；缺帧或时间差过大时，等待下一轮。
         const auto frame = frames.GetFrame(config.frameQueue.maxTimestampDiffMs);
@@ -370,58 +299,46 @@ int runCameraMode(const DartCongfig& config)
         }
 
         // ----------------------------------------------------------------
-        // step9  执行 YOLO 和引导灯检测
+        // step6  执行 YOLO 和引导灯检测
         // ----------------------------------------------------------------
         // 保留全图坐标、帧来源；检测显示窗口同时接收目标切换按键。
         const auto frameAimRevision = aimRevision;
         const auto detections = processFrame(*frame, yolo, guideLight);
 
         // ----------------------------------------------------------------
-        // step10  判断本帧能否用于观察，并选择搜索或测距
+        // step7  根据右图检测结果选择搜索或测距
         // ----------------------------------------------------------------
-        // 处理期间状态须保持一致，双帧须来自静止确认之后；右图无有效目标时搜索。
-        const bool sameContext = frameAimRevision == aimRevision &&
-            observationCommandAt == lastCommandAt && !preAimPending;
-        const bool capturedAfterStop = !communication || (stationaryAfterMs &&
-            std::min(frame->left.timestamp_ms, frame->right.timestamp_ms) > *stationaryAfterMs);
-        const bool freshObservation = sameContext && capturedAfterStop;
+        // 右图集合为空或全部为FAILED时进入搜索。
         const bool needSearch = std::none_of(detections.right.begin(), detections.right.end(),
             [](const auto& result) {
                 return result.status == GuideLightDetect::DetectStatus::SUCCESS;
             });
-        const bool canObserveStability = freshObservation && !needSearch;
 
         // ----------------------------------------------------------------
-        // step11  双目测距、稳定性更新与镖口坐标转换
+        // step8  双目测距与镖口坐标转换
         // ----------------------------------------------------------------
-        // 测距只输出几何结果；允许观察时更新BASE窗口，否则清空。
+        // 右图有有效目标时执行测距；搜索时使用空位置结果。
         std::vector<StereoscopicMeasurement::StereoscopicMeasurementResult> measurements;
         if (!needSearch) measurements = stereoscopicmeasurement.RunMeasurement(detections);
-        if (canObserveStability)
-            stereoscopicmeasurement.UpdateStability(detections, measurements);
-        else
-            resetStability();
         const auto locations = locationtransform.RunTransform(measurements);
 
         // ----------------------------------------------------------------
-        // step12  统一判断是否允许解算，并生成本帧 yaw
+        // step9  根据搜索或测距结果生成本帧 yaw
         // ----------------------------------------------------------------
-        // BASE精调须稳定且使用确认后的新双帧；OUTPOST和搜索不等待BASE窗口。
-        const bool canSolveYaw = freshObservation &&
-            (needSearch || !aim_base || canAimAtBase(locations, *frame, baseStableAfterMs));
+        // 目标缺失时不生成yaw，最终发送条件由checkSendConditions统一检查。
         std::optional<double> yaw;
-        if (canSolveYaw) {
-            if (needSearch) {
-                const double searchYaw = yawsolver.RunSearch(detections.left);
-                if (searchYaw != 0.0) yaw = searchYaw;
-            } else {
-                yaw = yawsolver.RunSolve(locations, aim_base);
-                printf("[YawSolver] target at %f send yaw %f \n", current_angle + yaw*3.14/180, yaw*3.14/180);
-            }
+        if (needSearch) {
+            const double searchYaw = yawsolver.RunSearch(detections.left);
+            if (searchYaw != 0.0) yaw = searchYaw;
+        } else {
+            yaw = yawsolver.RunSolve(locations, aim_base);
+            if (yaw)
+                std::printf("[YawSolver] target at %.6f deg, requested yaw %+.6f deg\n",
+                            (current_angle + *yaw) * 180.0 / CV_PI, *yaw * 180.0 / CV_PI);
         }
 
         // ----------------------------------------------------------------
-        // step13  刷新空间位置显示，并检查退出信号
+        // step10  刷新空间位置显示，并检查退出信号
         // ----------------------------------------------------------------
         // 搜索或测距无结果时显示空面板，清除上一帧位置。
         // 窗口事件和目标切换统一在 processFrame 中处理。
@@ -429,7 +346,7 @@ int runCameraMode(const DartCongfig& config)
         if (stopSignals.stopRequested()) break;
 
         // ----------------------------------------------------------------
-        // step14  最终检查通信状态，发送 yaw 并记录命令
+        // step11  最终检查通信状态，发送 yaw 并记录命令
         // ----------------------------------------------------------------
         // 发送前再次校验回传有效期、镖架状态及数据时序，成功后记录序号和时间。
         const auto status = checkSendConditions(yaw, *frame, frameAimRevision, config.communication);
@@ -440,7 +357,7 @@ int runCameraMode(const DartCongfig& config)
     }
 
     // ----------------------------------------------------------------
-    // step15  停止双相机采集并结束本次运行
+    // step12  停止双相机采集并结束本次运行
     // ----------------------------------------------------------------
     // 正常退出显式停止；异常路径由CameraInput析构完成设备清理。
     input.StopCamera();

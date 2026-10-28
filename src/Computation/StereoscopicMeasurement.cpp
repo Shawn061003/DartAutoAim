@@ -202,57 +202,7 @@ StereoscopicMeasurement::SelectFromCandidate(const std::vector<Candidate>& candi
     if (outpost) {
         selected.push_back(outpost->measurement);
         selected.back().TargetName = TargetClasses::OUTPOST;
-        selected.back().stable = true; // 场地OUTPOST不会运动，不依赖BASE的观测窗口。
         selected.back().reprojectionErrorPx = outpost->reprojectionErrorPx;
     }
     return selected;
-}
-
-void StereoscopicMeasurement::ResetStability() noexcept
-{
-    baseHistory_.clear();
-}
-
-void StereoscopicMeasurement::UpdateStability(
-    const GuideLightDetect::StereoDetectResult& detections,
-    std::vector<StereoscopicMeasurementResult>& measurements)
-{
-    // 1. OUTPOST不会运动，存在有效测量时直接标记；BASE单独积累历史。
-    StereoscopicMeasurementResult* base = nullptr;
-    for (auto& measurement : measurements) {
-        measurement.stable = measurement.TargetName == TargetClasses::OUTPOST;
-        if (measurement.TargetName == TargetClasses::BASE) base = &measurement;
-    }
-    if (!base) {
-        ResetStability();
-        return;
-    }
-
-    // 同侧检测均来自同一CameraFrame，时间戳不随检测项排序变化。
-    const BaseObservation current{base->leftPixel, base->rightPixel,
-        detections.left.front().timestamp_ms, detections.right.front().timestamp_ms};
-    if (!baseHistory_.empty() &&
-        (current.leftTimestampMs <= baseHistory_.back().leftTimestampMs ||
-         current.rightTimestampMs <= baseHistory_.back().rightTimestampMs)) {
-        // 同一帧不能重复计入五次观测，倒序帧也不能沿用旧的稳定结论。
-        ResetStability();
-        return;
-    }
-
-    // 2. 固定容量滑动窗口；未满5次有效新观测时不能判稳。
-    constexpr std::size_t capacity = 5;
-    constexpr double maxDisplacementPx = 2.0;
-    baseHistory_.push_back(current);
-    if (baseHistory_.size() > capacity) baseHistory_.pop_front();
-    if (baseHistory_.size() < capacity) return;
-
-    // 3. 比较窗口内任意两次中心的欧氏距离，防止小步累计位移被相邻帧比较漏掉。
-    for (std::size_t i = 0; i < baseHistory_.size(); ++i) {
-        for (std::size_t j = i + 1; j < baseHistory_.size(); ++j) {
-            if (cv::norm(baseHistory_[i].leftPixel - baseHistory_[j].leftPixel) >= maxDisplacementPx ||
-                cv::norm(baseHistory_[i].rightPixel - baseHistory_[j].rightPixel) >= maxDisplacementPx)
-                return;
-        }
-    }
-    base->stable = true;
 }
