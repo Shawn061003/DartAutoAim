@@ -27,6 +27,7 @@
 #include <filesystem>
 #include <iostream>
 #include <cmath>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -205,6 +206,90 @@ std::optional<dart_mcu::ReceivedStatus> checkSendConditions(
 }
 
 // ----------------------------------------------------------------
+// 逐帧诊断：保留双帧来源、匹配几何和KF输出，便于比较滤波前后的数据
+// ----------------------------------------------------------------
+const char* targetClassName(TargetClasses target)
+{
+    switch (target) {
+    case TargetClasses::BASE: return "BASE";
+    case TargetClasses::OUTPOST: return "OUTPOST";
+    default: return "UNKNOWN";
+    }
+}
+
+void printMeasurements(const StereoFrame& frame,
+    const GuideLightDetect::StereoDetectResult& detections,
+    const std::vector<StereoscopicMeasurement::StereoscopicMeasurementResult>& measurements,
+    const std::vector<LocationTransform::LocationTransformResult>& locations)
+{
+    const auto targetName = aim_base ? TargetClasses::BASE : TargetClasses::OUTPOST;
+    const auto successCount = [](const auto& results) {
+        return static_cast<std::size_t>(std::count_if(results.begin(), results.end(), [](const auto& result) {
+            return result.status == GuideLightDetect::DetectStatus::SUCCESS;
+        }));
+    };
+    std::printf("[Measure][before-KF] frames=(%llu,%llu) timestamps_ms=(%lld,%lld) "
+                "selected=%s detections_success/total=L:%zu/%zu,R:%zu/%zu matched=%zu\n",
+        static_cast<unsigned long long>(frame.left.frame_id),
+        static_cast<unsigned long long>(frame.right.frame_id),
+        static_cast<long long>(frame.left.timestamp_ms), static_cast<long long>(frame.right.timestamp_ms),
+        targetClassName(targetName), successCount(detections.left), detections.left.size(),
+        successCount(detections.right), detections.right.size(), measurements.size());
+    for (const auto& measurement : measurements) {
+        const auto& p = measurement.RealLocation;
+        std::printf("[Match] target=%s selected=%d pixels_L=(%.3f,%.3f) pixels_R=(%.3f,%.3f) "
+                    "reprojection_px=(L:%.6f,R:%.6f,max:%.6f) right_camera_mm=(%.3f,%.3f,%.3f)\n",
+            targetClassName(measurement.TargetName), measurement.TargetName == targetName ? 1 : 0,
+            measurement.leftPixel.x, measurement.leftPixel.y, measurement.rightPixel.x, measurement.rightPixel.y,
+            measurement.leftReprojectionErrorPx, measurement.rightReprojectionErrorPx,
+            measurement.reprojectionErrorPx, p.x, p.y, p.z);
+    }
+    for (const auto& location : locations) {
+        const auto& p = location.RealLocation;
+        const double yawDeg = p.x == 0.0 && p.y == 0.0
+            ? std::numeric_limits<double>::quiet_NaN() : std::atan2(p.x, p.y) * 180.0 / CV_PI;
+        std::printf("[Measure][raw] target=%s selected=%d dart_mm=(%.3f,%.3f,%.3f) yaw_deg=%.6f\n",
+            targetClassName(location.TargetName), location.TargetName == targetName ? 1 : 0,
+            p.x, p.y, p.z, yawDeg);
+    }
+}
+
+void printKalmanResult(const StereoFrame& frame,
+    const std::optional<DartKalmanFilter::KalmanFilterResult>& result,
+    const KalmanFilterParams& params, int lostFrames, bool canUpdate)
+{
+    const auto targetName = aim_base ? TargetClasses::BASE : TargetClasses::OUTPOST;
+    if (!result) {
+        std::printf("[KF][after] frames=(%llu,%llu) target=%s result=none can_update=%d "
+                    "lost_frames=%d/%d reason=%s\n",
+            static_cast<unsigned long long>(frame.left.frame_id),
+            static_cast<unsigned long long>(frame.right.frame_id), targetClassName(targetName),
+            canUpdate ? 1 : 0, lostFrames, params.lostResetFrames,
+            lostFrames > 0 ? "selected_target_missing" : "update_not_allowed");
+        return;
+    }
+    const auto& r = *result;
+    const auto& p = r.XkHat;
+    const double yawDeg = p.x == 0.0 && p.y == 0.0
+        ? std::numeric_limits<double>::quiet_NaN() : std::atan2(p.x, p.y) * 180.0 / CV_PI;
+    std::printf("[KF][after] frames=(%llu,%llu) target=%s dart_mm=(%.3f,%.3f,%.3f) "
+                "yaw_deg=%.6f P_diag_mm2=(%.6f,%.6f,%.6f)\n",
+        static_cast<unsigned long long>(frame.left.frame_id),
+        static_cast<unsigned long long>(frame.right.frame_id), targetClassName(r.TargetName),
+        p.x, p.y, p.z, yawDeg, r.Pk(0, 0), r.Pk(1, 1), r.Pk(2, 2));
+    std::printf("[KF][gate] age=%zu/%d yaw_sigma_deg=%.6f/%.6f NIS=%.6f/%.6f "
+                "yaw_residual_mean_deg=%+.6f abs_limit_deg=%.6f "
+                "pass=(age:%d,precision:%d,innovation:%d,drift:%d) stable=%d required_streak=%d\n",
+        r.age, params.minAge, r.yawSigmaDeg, params.maxYawErrorDeg, r.nis, params.maxNis,
+        r.yawResidualMeanDeg, params.maxYawErrorDeg,
+        r.age >= static_cast<std::size_t>(params.minAge) ? 1 : 0,
+        std::isfinite(r.yawSigmaDeg) && r.yawSigmaDeg <= params.maxYawErrorDeg ? 1 : 0,
+        std::isfinite(r.nis) && r.nis >= 0.0 && r.nis <= params.maxNis ? 1 : 0,
+        std::isfinite(r.yawResidualMeanDeg) && std::abs(r.yawResidualMeanDeg) <= params.maxYawErrorDeg ? 1 : 0,
+        r.stable ? 1 : 0, params.stableFrames);
+}
+
+// ----------------------------------------------------------------
 // 当前目标滤波：按aim_base选择测量，连续缺失达到阈值时清除KF历史
 // ----------------------------------------------------------------
 // 每对已处理双帧调用一次；不以空轮询计数，也不在目标缺失时输出旧位置。
@@ -218,8 +303,11 @@ std::optional<DartKalmanFilter::KalmanFilterResult> filterSelectedTarget(
     if (target == locations.end()) {
         kalmanFilter.InvalidateStability();
         // 计数达到阈值后保持饱和，仅在首次达到阈值时重置。
-        if (lostFrames < lostResetFrames && ++lostFrames == lostResetFrames)
+        if (lostFrames < lostResetFrames && ++lostFrames == lostResetFrames) {
+            std::printf("[KF][reset] target=%s reason=consecutive_missing lost_frames=%d\n",
+                targetClassName(targetName), lostFrames);
             kalmanFilter.Reset();
+        }
         return std::nullopt;
     }
 
@@ -354,11 +442,15 @@ int runCameraMode(const DartCongfig& config)
         if (!needSearch) measurements = stereoscopicmeasurement.RunMeasurement(detections);
         const auto locations = locationtransform.RunTransform(measurements);
 
+        // 按类别打印本帧全部匹配，不假设BASE/OUTPOST与数组下标固定对应。
+        printMeasurements(*frame, detections, measurements, locations);
+
         // ----------------------------------------------------------------
         // step9  卡尔曼滤波定位
         // ----------------------------------------------------------------
         // 切换目标或下发运动命令后，旧位置不再属于当前观测上下文。
         if (kalmanCommandAt != lastCommandAt || kalmanAimRevision != aimRevision) {
+            std::printf("[KF][reset] reason=target_or_command_changed\n");
             kalmanFilter.Reset();
             kalmanLostFrames = 0;
             kalmanCommandAt = lastCommandAt;
@@ -378,6 +470,7 @@ int runCameraMode(const DartCongfig& config)
         if (!canUpdateKalman) kalmanFilter.Reset();
         const auto filteredTarget = filterSelectedTarget(locations, kalmanFilter,
             kalmanLostFrames, config.kalmanFilter.lostResetFrames, canUpdateKalman);
+        printKalmanResult(*frame, filteredTarget, config.kalmanFilter, kalmanLostFrames, canUpdateKalman);
         std::vector<LocationTransform::LocationTransformResult> filteredLocations;
         if (filteredTarget)
             filteredLocations.push_back({filteredTarget->XkHat, filteredTarget->TargetName});
