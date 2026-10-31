@@ -94,6 +94,9 @@ bool sendYawCommand(double relativeYaw, const dart_mcu::ReceivedStatus& status,
                   << " deg, maximum=17 deg\n";
         return false;
     }
+    if (relativeYaw <= 0.0001745329){
+        return false;
+    }
     communication->send({0, relativeYaw, 0}, std::chrono::milliseconds(params.writeTimeoutMs));
     // 被拒绝或send抛异常时均不提交；此处记录的是成功写入的命令角度估计。
     current_angle = nextAngle;
