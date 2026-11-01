@@ -3,7 +3,7 @@
 #include <map>
 #include <limits>
 
-// Included after the monocular solver; capture never runs a chessboard detector.
+// Included after the monocular solver; capture never runs a target detector.
 namespace livecalib {
 inline void ensure(bool ok,const std::string& message) {if(!ok) throw std::runtime_error(message);}
 constexpr const char* collectWindow="单目标定 - 采集 BMP";
@@ -12,7 +12,7 @@ inline std::string fileStamp(const fs::path& p) {
     return std::to_string(fs::file_size(p))+":"+std::to_string(fs::last_write_time(p).time_since_epoch().count());
 }
 inline bool validPoints(const std::vector<cv::Point2f>& points,cv::Size size,cv::Size board) {
-    return points.size()==static_cast<std::size_t>(board.area()) && std::all_of(points.begin(),points.end(),[&](const cv::Point2f& p) {
+    return points.size()==static_cast<std::size_t>(4*board.area()) && std::all_of(points.begin(),points.end(),[&](const cv::Point2f& p) {
         return std::isfinite(p.x) && std::isfinite(p.y) && p.x>=0 && p.y>=0 && p.x<size.width && p.y<size.height;
     });
 }
@@ -54,7 +54,8 @@ inline std::vector<Sample> selected(const std::vector<MonoRecord>& records) {
 inline void saveAnnotations(const Options& o,const MonoDataset& data) {
     const auto pending=o.input/"annotations.pending.yaml";
     cv::FileStorage f(pending.string(),cv::FileStorage::WRITE);ensure(f.isOpened(),"Cannot save annotations");
-    f<<"schema_version"<<1<<"camera_side"<<o.side<<"columns"<<o.board.width<<"rows"<<o.board.height<<"square_mm"<<o.squareMm
+    aprilgrid::writeSpecification(f);
+    f<<"schema_version"<<2<<"camera_side"<<o.side<<"columns"<<o.board.width<<"rows"<<o.board.height
      <<"image_width"<<data.size.width<<"image_height"<<data.size.height<<"records"<<"[";
     for(const auto& r:data.records) f<<"{"<<"file"<<r.sample.image<<"stamp"<<fileStamp(r.path)<<"state"<<static_cast<int>(r.state)<<"roi"<<r.roi<<"points"<<r.sample.points<<"}";
     f<<"]";f.release();fs::rename(pending,o.input/"annotations.yaml");
@@ -62,9 +63,8 @@ inline void saveAnnotations(const Options& o,const MonoDataset& data) {
 inline void loadAnnotations(const Options& o,MonoDataset& data) {
     if(!fs::exists(o.input/"annotations.yaml")) return;
     cv::FileStorage f((o.input/"annotations.yaml").string(),cv::FileStorage::READ);ensure(f.isOpened(),"Cannot read annotations");
-    ensure(static_cast<int>(f["schema_version"])==1 && static_cast<std::string>(f["camera_side"])==o.side &&
+    ensure(static_cast<int>(f["schema_version"])==2 && aprilgrid::matchesSpecification(f) && static_cast<std::string>(f["camera_side"])==o.side &&
         static_cast<int>(f["columns"])==o.board.width && static_cast<int>(f["rows"])==o.board.height &&
-        std::abs(static_cast<double>(f["square_mm"])-o.squareMm)<1e-6 &&
         cv::Size(static_cast<int>(f["image_width"]),static_cast<int>(f["image_height"]))==data.size,"Annotation camera/board/dimensions mismatch");
     std::map<std::string,MonoRecord*> files;for(auto& r:data.records) files[r.sample.image]=&r;
     for(const auto& n:f["records"]) {
@@ -144,7 +144,7 @@ inline int collect(const Options& o) {
         }
         if(saving.valid()) count=saving.get();
         cv::destroyWindow(collectWindow);
-        std::cout<<"Saved "<<count<<" images. Next: ./build/demarcate --calibration --side="<<o.side<<" --input="<<o.input<<'\n';return 0;
+        std::cout<<"Saved "<<count<<" images. Next: ./build/calibration --calibration --side="<<o.side<<" --input="<<o.input<<'\n';return 0;
     }catch(...) {cv::destroyWindow(collectWindow);throw;}
 }
 
@@ -173,18 +173,7 @@ struct MonoViewport {
 };
 inline bool detectRoi(const cv::Mat& image,cv::Rect roi,cv::Size board,std::vector<cv::Point2f>& points) {
     points.clear();if(image.empty() || roi.width<24 || roi.height<24 || (roi&cv::Rect({},image.size()))!=roi) return false;
-    cv::Mat gray;cv::cvtColor(image(roi),gray,cv::COLOR_BGR2GRAY);
-    bool found=cv::findChessboardCornersSB(gray,board,points,cv::CALIB_CB_NORMALIZE_IMAGE);
-    if(!found) {points.clear();found=cv::findChessboardCorners(gray,board,points,cv::CALIB_CB_ADAPTIVE_THRESH|cv::CALIB_CB_NORMALIZE_IMAGE|cv::CALIB_CB_FAST_CHECK);}
-    if(!found || points.size()!=static_cast<std::size_t>(board.area())) {points.clear();return false;}
-    double spacing=1e9;
-    for(int y=0;y<board.height;++y) for(int x=0;x<board.width;++x) {
-        const int i=y*board.width+x;
-        if(x+1<board.width) spacing=std::min(spacing,cv::norm(points[i+1]-points[i]));
-        if(y+1<board.height) spacing=std::min(spacing,cv::norm(points[i+board.width]-points[i]));
-    }
-    const int half=std::clamp(static_cast<int>(std::floor(spacing*.35)),1,9);
-    cv::cornerSubPix(gray,points,{half,half},{-1,-1},{cv::TermCriteria::COUNT|cv::TermCriteria::EPS,50,.001});
+    if(board!=cv::Size(aprilgrid::kColumns,aprilgrid::kRows) || !aprilgrid::detect(image(roi),points)) return false;
     for(auto& p:points) p+=cv::Point2f(static_cast<float>(roi.x),static_cast<float>(roi.y));
     if(!validPoints(points,image.size(),board)) {points.clear();return false;}return true;
 }
@@ -272,7 +261,7 @@ public:
                 auto result=detection_.get();
                 if(result.index==index_ && result.epoch==epoch_) {
                     detected_=std::move(result);current().sample.points=detected_.points;persist();
-                    status_=detected_.found?"已找到完整棋盘；检查角点位置后按空格接受":"ROI 内未找到完整棋盘；请框全角点并保留白边，或按 N 跳过";
+                    status_=detected_.found?"已找到完整AprilGrid（36个标记）；检查角点位置后按空格接受":"ROI 内未找到完整AprilGrid（36个标记）；请框全角点并保留白边，或按 N 跳过";
                 }
             }catch(const std::exception& e){status_=std::string("ROI 检测失败：")+e.what();}
         }
@@ -300,7 +289,7 @@ public:
         if(key=='d') {if(r.state==MonoRecord::State::Accepted) {r.state=MonoRecord::State::Pending;changed();status_="已移出标定，保留 ROI 和角点";}return;}
         if(key=='r') {setRoi({});status_="已清除 ROI，请重新框选";return;}
         if(key==' ') {
-            if(raw_.empty() || detectorBusy() || !detected_.found || r.roi.empty()) {status_="当前 ROI 必须检测到完整棋盘才能接受";return;}
+            if(raw_.empty() || detectorBusy() || !detected_.found || r.roi.empty()) {status_="当前 ROI 必须检测到完整AprilGrid（36个标记）才能接受";return;}
             if(r.state!=MonoRecord::State::Accepted) {
                 if(selected(data_.records).size()>=static_cast<std::size_t>(o_.maxViews)) {status_="已达图片数量上限，请移除一张或增大 --max-views";return;}
                 r.state=MonoRecord::State::Accepted;undo_.push_back(index_);changed();
@@ -347,7 +336,7 @@ public:
         }
         if(event==cv::EVENT_LBUTTONUP && drag_) {
             drag_=false;const auto roi=view_.roi(start_,point);
-            if(roi.width<24 || roi.height<24) {status_="ROI 太小，请框选完整棋盘并保留白边";return;}
+            if(roi.width<24 || roi.height<24) {status_="ROI 太小，请框选完整AprilGrid（36个标记）并保留白边";return;}
             setRoi(roi);status_="正在后台检测 ROI 内原始分辨率角点";
         }
     }
@@ -366,7 +355,7 @@ public:
             if(!box.empty()) cv::rectangle(pane,view_.project(box.tl())-offset,view_.project(box.br())-offset,{70,215,255},1,cv::LINE_AA);
             if(detected_.found) {
                 std::vector<cv::Point2f> points;for(const auto& p:detected_.points) points.emplace_back(view_.project(p)-offset);
-                cv::drawChessboardCorners(pane,o_.board,points,true);
+                aprilgrid::draw(pane,points);
             }
         }
         text(canvas,status_.substr(0,140),15,635,{70,215,255});
@@ -376,7 +365,7 @@ public:
         for(const auto& b:monoButtons()) {cv::rectangle(canvas,b.box,{65,65,65},cv::FILLED);text(canvas,b.caption,b.box.x+8,b.box.y+27);}
         text(canvas,std::string("ROI 检测：")+(detectorBusy()?"处理中":"就绪")+cv::format(" | 上次 %.0f ms",detected_.ms),435,900);
         text(canvas,"标注自动保存；Q/ESC 退出并保存当前有效标定结果",15,955);
-        text(canvas,"按原始像素求解；请变化棋盘位置、大小及倾角；测距精度尚未验证",15,985);
+        text(canvas,"按原始像素求解；请变化标定板位置、大小及倾角；测距精度尚未验证",15,985);
         cv::line(canvas,{1100,0},{1100,999},{75,75,75});int y=30;
         auto line=[&](const std::string& t){text(canvas,t,1115,y);y+=28;};
         line("当前标定数据");line("相机："+calibration_ui::sideName(o_.side)+" | 模型："+calibration_ui::modelName(o_.model));

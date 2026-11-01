@@ -1,6 +1,7 @@
 // Headless workflow regression: real BMP I/O, native ROI coordinates, annotation epochs and selected-fit identity.
 #define DART_STEREO_WORKFLOW_NO_MAIN
 #include "../sub_module/StereoCalibration/stereo_calibration.cpp"
+#include "aprilgrid_fixture.hpp"
 
 namespace {
 using namespace stereo_workflow;
@@ -9,10 +10,7 @@ template<class F> void Reject(F action,const std::string& message) {
     bool rejected=false;try{action();}catch(const std::exception&){rejected=true;}Check(rejected,message);
 }
 std::vector<cv::Point2f> Board(cv::Mat& image,cv::Point origin,int cell) {
-    for(int y=0;y<=kRows;++y) for(int x=0;x<=kColumns;++x)
-        cv::rectangle(image,{origin.x+x*cell,origin.y+y*cell,cell,cell},(x+y)%2?cv::Scalar(250,250,250):cv::Scalar(10,10,10),cv::FILLED);
-    std::vector<cv::Point2f> points;for(int y=0;y<kRows;++y) for(int x=0;x<kColumns;++x) points.emplace_back(origin.x+(x+1)*cell-.5f,origin.y+(y+1)*cell-.5f);
-    return points;
+    return renderAprilGrid(image,origin,cell);
 }
 double Error(const std::vector<cv::Point2f>& a,const std::vector<cv::Point2f>& b) {
     if(a.size()!=b.size() || a.empty()) return 1e9;
@@ -46,7 +44,7 @@ int main() {
         // Lossless collection, explicit timing gate and refusal to overwrite a prior session.
         PairWriter writer(root/"capture",5);StereoFrame pair;
         pair.left.image=cv::Mat(960,1280,CV_8UC3,cv::Scalar(210,210,210));pair.right.image=cv::Mat(720,960,CV_8UC3,cv::Scalar(210,210,210));
-        const auto expectedLeft=Board(pair.left.image,{300,240},22),expectedRight=Board(pair.right.image,{160,180},30);
+        const auto expectedLeft=Board(pair.left.image,{300,240},40),expectedRight=Board(pair.right.image,{160,180},50);
         pair.left.frame_id=123;pair.right.frame_id=456;pair.left.timestamp_ms=10000;pair.right.timestamp_ms=10004;
         Check(cv::imwrite((root/"collection-dashboard.png").string(),CollectionDashboard(pair,0,true,5,1.,"后台保存原始 BMP 图片组")),"Cannot render live collection preview");
         writer.append(pair);Check(writer.count()==1,"Collection lost a saved pair");
@@ -61,7 +59,7 @@ int main() {
         fs::copy_file(root/"capture/left/000001.bmp",root/"capture/left/left1.bmp");
         Reject([&]{ReadDataset(root/"capture");},"Ambiguous duplicate pair IDs accepted");fs::remove(root/"capture/left/left1.bmp");
         // Native ROI-only detection and exact offset recovery on both resolutions.
-        const cv::Rect lr(280,220,310,240),rr(140,160,400,310);
+        const cv::Rect lr(280,220,340,340),rr(140,160,420,420);
         auto detection=DetectPair(pair.left.image,pair.right.image,lr,rr,7,99);
         Check(detection.index==7 && detection.epoch==99 && detection.leftFound && detection.rightFound &&
               Error(detection.left,expectedLeft)<.2 && Error(detection.right,expectedRight)<.2,"ROI detection lost native coordinates or result generation");
@@ -88,17 +86,25 @@ int main() {
         Camera left{(cv::Mat_<double>(3,3)<<1600,0,640,0,1600,480,0,0,1),cv::Mat::zeros(5,1,CV_64F),{1280,960}};
         Camera right{(cv::Mat_<double>(3,3)<<2000,0,480,0,2000,360,0,0,1),cv::Mat::zeros(5,1,CV_64F),{960,720}};
         auto data=ReadDataset(input);cv::Mat rotation;cv::Rodrigues(cv::Vec3d(.004,.02,-.003),rotation);const cv::Mat translation=(cv::Mat_<double>(3,1)<<-510,2,12);
-        std::vector<cv::Point3f> object;for(int y=0;y<kRows;++y) for(int x=0;x<kColumns;++x) object.emplace_back(x*kSquareMm,y*kSquareMm,0);
+        const auto object=aprilgrid::objectPoints();
         for(int i=0;i<3;++i) {
-            auto& r=data.records[i];const cv::Vec3d rv(-.15+.14*i,.12-.12*i,.015*i);const cv::Mat tv=(cv::Mat_<double>(3,1)<<-30+100*i,-100+70*i,2500+200*i);
+            auto& r=data.records[i];const cv::Vec3d rv(-.15+.14*i,.12-.12*i,.015*i);const cv::Mat tv=(cv::Mat_<double>(3,1)<<-30+100*i,-330+25*i,3600+200*i);
             cv::Mat br,rrv;cv::Rodrigues(rv,br);cv::Rodrigues(rotation*br,rrv);const cv::Mat rtv=rotation*tv+translation;
             cv::projectPoints(object,rv,tv,left.K,left.D,r.sample.pair.left);cv::projectPoints(object,rrv,rtv,right.K,right.D,r.sample.pair.right);
             r.leftRoi=lr;r.rightRoi=rr;r.state=Record::State::Accepted;
         }
         SaveAnnotations(input/"annotations.yaml",data.records);Settings settings;settings.input=input;settings.output=root/"Result";settings.minPairs=3;
-        Review review(settings,left,right);Poll(review,[&]{return !review.solution().R.empty();});
+        // 错误旧内参不应影响新流程：每轮必须从当前图片独立恢复K/D。
+        Camera wrongLeft=left,wrongRight=right;
+        wrongLeft.K=left.K.clone();wrongRight.K=right.K.clone();
+        wrongLeft.K.at<double>(0,0)*=1.2;wrongRight.K.at<double>(1,1)*=.8;
+        Review review(settings,wrongLeft,wrongRight);Poll(review,[&]{return !review.solution().R.empty();});
         Check(review.solution().pairs.size()==3 && cv::norm(review.solution().T-translation)<.1 && review.solution().rms<.01,
               "Restored fit failed to recover known bounded extrinsics");
+        Check(review.solution().intrinsicsRefitted && cv::norm(review.solution().leftFit.camera.K-left.K)<1 &&
+              cv::norm(review.solution().rightFit.camera.K-right.K)<1 &&
+              review.solution().leftFit.perViewErrors.total()==3 && review.solution().rightFit.perViewErrors.total()==3,
+              "Current-image monocular fits missing or reused wrong old intrinsics");
         Check(review.currentIndex()==3,"Review did not resume at the pending pair");
         // Exercise both actual review input paths, including broken GTK wheel event coordinates.
         const auto point=review.viewport(1).project({480,360});
@@ -122,13 +128,21 @@ int main() {
         for(int i=0;i<20;++i) {review.update();std::this_thread::sleep_for(std::chrono::milliseconds(5));}
         Check(review.records()[3].state==Record::State::Skipped && review.solution().pairs.size()==3,"Skipped/in-flight ROI changed the fit dataset");
         Drag(review,lv,lr);Drag(review,rv,rr);
-        Poll(review,[&]{return review.records()[3].sample.pair.left.size()==88 && review.records()[3].sample.pair.right.size()==88;});
+        Poll(review,[&]{return review.records()[3].sample.pair.left.size()==aprilgrid::kPointCount && review.records()[3].sample.pair.right.size()==aprilgrid::kPointCount;});
         Check(cv::imwrite((root/"roi-dashboard.png").string(),review.render()),"Cannot render native ROI overlay");
         review.key(' ');Check(review.records()[3].state==Record::State::Accepted,"Complete manual ROIs could not be accepted");
         review.key('d');Check(review.records()[3].state==Record::State::Pending && review.solution().R.empty(),"Removed pair left stale fit metrics visible");
         Poll(review,[&]{return review.solution().pairs.size()==3;});
         review.key('s');const int result=review.finish();Check(result==0,"Valid offline ROI fit did not pass quality checks");
         cv::FileStorage report((settings.output/"stereo.yaml").string(),cv::FileStorage::READ);
+        const auto exportedLeft=ReadCamera(settings.output/"left_intrinsics.yaml");
+        const auto exportedRight=ReadCamera(settings.output/"right_intrinsics.yaml");
+        cv::Mat stereoLeftK,stereoRightK;
+        report["K_left_reference"]>>stereoLeftK;report["K_right"]>>stereoRightK;
+        Check(cv::norm(exportedLeft.K-stereoLeftK)==0 && cv::norm(exportedRight.K-stereoRightK)==0 &&
+              cv::norm(exportedLeft.K-review.solution().leftFit.camera.K)==0 &&
+              static_cast<std::string>(report["intrinsics_policy"])=="refit_monocular_then_CALIB_FIX_INTRINSIC",
+              "Saved mono/stereo files used different intrinsics snapshots");
         Check(static_cast<std::string>(report["capture_mode"])=="offline_manual_roi_native_full_frames" && report["pairs"].size()==3 &&
               static_cast<int>(report["pairs"][0]["frame_timestamps_available"])==0 && static_cast<int>(report["pairs"][0]["host_timestamp_diff_ms"])==-1,
               "Offline report misreported fit membership or unknown exposure/receive times");
@@ -145,7 +159,7 @@ int main() {
         auto listData=ReadDataset(list.input);
         for(auto& r:listData.records) {
             r.state=Record::State::Accepted;r.leftRoi=r.rightRoi={0,0,64,48};
-            for(int y=0;y<8;++y) for(int x=0;x<11;++x) r.sample.pair.left.emplace_back(4+4*x,4+4*y);
+            for(const auto& p:aprilgrid::objectPoints()) r.sample.pair.left.emplace_back(4+.08f*p.x,4+.05f*p.y);
             r.sample.pair.right=r.sample.pair.left;
         }
         SaveAnnotations(list.input/"annotations.yaml",listData.records);

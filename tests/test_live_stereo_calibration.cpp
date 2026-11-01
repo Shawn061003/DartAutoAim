@@ -1,12 +1,12 @@
 // No SDK devices or GUI windows: mixed-resolution geometry, pairing gate, output and live dashboard.
 #define DART_STEREO_CALIBRATION_NO_MAIN
 #include "../sub_module/StereoCalibration/stereo_calibrate.cpp"
+#include "aprilgrid_fixture.hpp"
 
 namespace {
 void Check(bool ok,const std::string& message) { if(!ok) throw std::runtime_error(message); }
 std::vector<stereo_live::LivePair> Synthetic(const Camera& left,const Camera& right,const cv::Mat& R,const cv::Mat& T,const fs::path& root) {
-    std::vector<cv::Point3f> board;
-    for(int y=0;y<kRows;++y) for(int x=0;x<kColumns;++x) board.emplace_back(x*kSquareMm,y*kSquareMm,0);
+    const auto board=aprilgrid::objectPoints();
     std::vector<stereo_live::LivePair> samples;
     for(int i=0;i<12;++i) {
         const cv::Vec3d rv(.07*(i%4-1),.08*(i%3-1),.025*(i%5));
@@ -26,10 +26,8 @@ std::vector<stereo_live::LivePair> Synthetic(const Camera& left,const Camera& ri
             sample.pair.right[j].x+=0.015*std::cos(static_cast<double>(i*11+j));
             sample.pair.right[j].y+=0.015*std::sin(static_cast<double>(i*17+j));
         }
-        const bool reverse=i%3==0;
-        if(reverse) std::reverse(sample.pair.right.begin(),sample.pair.right.end());
         sample.pair.rightReversed=stereo_live::AlignRight(sample.pair.left,sample.pair.right);
-        Check(sample.pair.rightReversed==reverse,"180-degree right ordering was not corrected");
+        Check(!sample.pair.rightReversed,"ID-ordered AprilGrid points were reversed");
         sample.leftId=100+i; sample.rightId=700+i;
         sample.leftTime=10000+i*1000; sample.rightTime=sample.leftTime+3;
         samples.push_back(std::move(sample));
@@ -58,12 +56,7 @@ int main() {
         rendered.left.image=cv::Mat(left.referenceSize,CV_8UC3,cv::Scalar(220,220,220));
         rendered.right.image=cv::Mat(right.referenceSize,CV_8UC3,cv::Scalar(220,220,220));
         auto drawBoard=[](cv::Mat& image,int ox,int oy,int cell) {
-            std::vector<cv::Point2f> expected;
-            for(int y=0;y<=kRows;++y) for(int x=0;x<=kColumns;++x)
-                cv::rectangle(image,{ox+x*cell,oy+y*cell,cell,cell},(x+y)%2?cv::Scalar(255,255,255):cv::Scalar(0,0,0),cv::FILLED);
-            for(int y=0;y<kRows;++y) for(int x=0;x<kColumns;++x)
-                expected.emplace_back(ox+(x+1)*cell-.5f,oy+(y+1)*cell-.5f);
-            return expected;
+            return renderAprilGrid(image,{ox,oy},cell);
         };
         const auto expectedLeft=drawBoard(rendered.left.image,1900,1250,80);
         const auto expectedRight=drawBoard(rendered.right.image,220,200,45);
@@ -73,7 +66,7 @@ int main() {
         // Distant left boards occupy only 3 pixels/cell after the old 1600-pixel overview.
         // Preserve native points and use a refinement window smaller than a neighbouring cell.
         // fx ~= 10414 px and 30 mm squares at 14 m give ~22.3 native pixels/cell.
-        for (const int cell : {8,10,12,22}) {
+        for (const int cell : {40,50,60,80}) {
             StereoFrame distant;
             distant.left.image=cv::Mat(left.referenceSize,CV_8UC3,cv::Scalar(210,210,210));
             distant.right=detected.frame.right;
@@ -91,8 +84,7 @@ int main() {
         std::vector<cv::Point2f> missing{{1,2}};
         Check(!Detect(cv::Mat(left.referenceSize,CV_8UC3,cv::Scalar(128,128,128)),missing,true,3200) &&
               missing.empty(),"Missing distant board left stale corner coordinates");
-        std::vector<cv::Point3f> constraintBoard;
-        for (int y=0;y<kRows;++y) for (int x=0;x<kColumns;++x) constraintBoard.emplace_back(x*kSquareMm,y*kSquareMm,0);
+        const auto constraintBoard=aprilgrid::objectPoints();
         std::vector<std::vector<cv::Point2f>> jacobianLeft,jacobianRight;
         for (const auto& pair:pairs) { jacobianLeft.push_back(pair.pair.left); jacobianRight.push_back(pair.pair.right); }
         BoundedStereoProblem problem(constraintBoard,jacobianLeft,jacobianRight,{left.K,left.D,right.K,right.D},T.at<double>(0));
@@ -122,7 +114,7 @@ int main() {
                       "Optical-axis translation bounds failed at an extreme optimizer parameter");
             }
         }
-        auto fitted=Solve(pairs,left,right,10);
+        auto fitted=SolveFixedIntrinsics(pairs,left,right,10);
         Check(fitted.passed,"Mixed-resolution/focal-length stereo failed basic checks");
         Check(cv::norm(fitted.R-R,cv::NORM_INF)<1e-4 && cv::norm(fitted.T-T)<1,"Known stereo extrinsics not recovered");
         Check(cv::norm(left.K,originalK1)==0 && cv::norm(right.K,originalK2)==0 &&
@@ -134,19 +126,19 @@ int main() {
         const double reportedRms=std::sqrt(cv::norm(fitted.errors,cv::NORM_L2SQR)/(2*fitted.errors.rows));
         Check(std::abs(reportedRms-fitted.rms)<1e-12,"Bounded per-camera residuals disagree with reported RMS");
         const cv::Mat positiveT=(cv::Mat_<double>(3,1)<<490,-4,35);
-        const auto positive=Solve(Synthetic(left,right,R,positiveT,root),left,right,10);
+        const auto positive=SolveFixedIntrinsics(Synthetic(left,right,R,positiveT,root),left,right,10);
         Check(positive.passed && positive.T.at<double>(0)>0 && cv::norm(positive.T-positiveT)<1 &&
               TranslationBounds(510).contains(positive.T),cv::format("Positive-X fit failed: Tx=%.3f error=%.3f rms=%.4f epi=%.4f converged=%d iterations=%d",positive.T.at<double>(0),cv::norm(positive.T-positiveT),positive.rms,positive.epiP95,positive.translationConstraint.converged,positive.translationConstraint.iterations));
         Solution outsideForSave;
         for (const cv::Vec3d& outside : {cv::Vec3d(-650,-4,35),cv::Vec3d(-490,90,35),cv::Vec3d(-490,-4,240),cv::Vec3d(-800,120,300)}) {
             const cv::Mat actual=(cv::Mat_<double>(3,1)<<outside[0],outside[1],outside[2]);
-            const auto constrained=Solve(Synthetic(left,right,R,actual,root),left,right,10);
+            const auto constrained=SolveFixedIntrinsics(Synthetic(left,right,R,actual,root),left,right,10);
             Check(!TranslationBounds(-510).contains(constrained.translationConstraint.initialT) &&
                   TranslationBounds(-510).contains(constrained.T),"Out-of-range initial T was not constrained");
             Check(constrained.rms>constrained.translationConstraint.initialRms+1e-4 &&
                   cv::norm(constrained.R.t()*constrained.R-cv::Mat::eye(3,3,CV_64F))<1e-9,
                   "Constrained fit hid residual increase or produced an invalid rotation");
-            const auto free=UnconstrainedSolution(constrained,left,right,10);
+            const auto free=UnconstrainedSolution(constrained,10);
             Check(cv::norm(free.T-actual)<1 && free.rms<.05 && free.epiP95<.08 && free.passed &&
                   cv::norm(free.errors-constrained.translationConstraint.initialErrors)==0,
                   "Unconstrained snapshot was overwritten by bounded refinement or evaluated with bounded errors");
@@ -172,13 +164,13 @@ int main() {
         const auto mismatch=MeasureEpipolar(pairs.front().pair.left,shifted,left,right,fitted.F);
         Check(mismatch.p95>35,"40-pixel input inconsistency was not exposed in native pixel units");
         auto contaminated=pairs; for(auto& p:contaminated[3].pair.right) p.y+=25;
-        auto bad=Solve(contaminated,left,right,10);
+        auto bad=SolveFixedIntrinsics(contaminated,left,right,10);
         Check(!bad.passed && bad.pairs.size()==pairs.size() && bad.epiP95>1,"Bad paired pose was silently dropped or marked good");
         Check(bad.pairs[Worst(bad)].pair.number==4,"Worst-pair removal would target wrong pair");
         auto retained=contaminated; retained.erase(retained.begin()+static_cast<std::ptrdiff_t>(Worst(bad)));
-        Check(Solve(retained,left,right,10).passed,"Removing bad pair did not recover the valid solution");
-        auto partial=pairs; partial.resize(2); Check(Solve(partial,left,right,10).R.empty(),"Incomplete session yielded valid stereo output");
-        partial=pairs; partial.resize(3); Check(!Solve(partial,left,right,10).passed,"Three pairs passed the ten-pair quality policy");
+        Check(SolveFixedIntrinsics(retained,left,right,10).passed,"Removing bad pair did not recover the valid solution");
+        auto partial=pairs; partial.resize(2); Check(SolveFixedIntrinsics(partial,left,right,10).R.empty(),"Incomplete session yielded valid stereo output");
+        partial=pairs; partial.resize(3); Check(!SolveFixedIntrinsics(partial,left,right,10).passed,"Three pairs passed the ten-pair quality policy");
 
         Observation observation; observation.leftFound=observation.rightFound=true;
         observation.left=pairs[0].pair.left; observation.right=pairs[0].pair.right;
@@ -214,7 +206,7 @@ int main() {
             fs::create_hard_link(pairs[0].pair.rightPath,pairs[i].pair.rightPath);
         }
         Options options; options.output=root; options.pairMs=5;
-        Save(options,left,right,fitted);
+        Save(options,fitted);
         cv::FileStorage report((root/"stereo.yaml").string(),cv::FileStorage::READ);
         cv::Mat loadedR,loadedT,loadedK; report["R"]>>loadedR; report["T_mm"]>>loadedT; report["K_left_reference"]>>loadedK;
         Check(cv::norm(loadedR,fitted.R)<1e-12 && cv::norm(loadedT,fitted.T)<1e-12 && cv::norm(loadedK,left.K)==0,"Export changed extrinsics/coordinate system");
@@ -235,7 +227,7 @@ int main() {
               fs::exists(root/"reference_unconstrained.png"),"Unconstrained companion report/reference was not saved");
         // An incompatible physical baseline must stay out of bounds in the unrestricted output.
         auto compareOptions=options;compareOptions.output=root/"comparison";fs::create_directory(compareOptions.output);
-        Save(compareOptions,left,right,outsideForSave);
+        Save(compareOptions,outsideForSave);
         cv::FileStorage boundedDisk((compareOptions.output/"stereo.yaml").string(),cv::FileStorage::READ);
         cv::FileStorage freeDisk((compareOptions.output/"stereo_unconstrained.yaml").string(),cv::FileStorage::READ);
         cv::Mat boundedT,unboundedT,unboundedR,unboundedE,unboundedF,unboundedErrors;

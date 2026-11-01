@@ -1,6 +1,7 @@
-// Headless regression checks: real chessboard detection, official filtering, solve and stereo-compatible export.
+// Headless regression checks: real AprilGrid detection, official filtering, solve and stereo-compatible export.
 #define DART_CALIBRATION_NO_MAIN
 #include "../sub_module/Calibration/demarcate.cpp"
+#include "aprilgrid_fixture.hpp"
 
 namespace {
 void require(bool condition, const std::string& message) {
@@ -31,16 +32,13 @@ int main() {
         const cv::Size nativeSize(5472,3648);
         cv::Mat image(nativeSize,CV_8UC3,cv::Scalar(220,220,220));
         const int ox=1800,oy=1400,cell=80;
-        for(int y=0;y<9;++y) for(int x=0;x<12;++x)
-            cv::rectangle(image,{ox+x*cell,oy+y*cell,cell,cell},(x+y)%2?cv::Scalar(255,255,255):cv::Scalar(0,0,0),cv::FILLED);
+        const auto expected=renderAprilGrid(image,{ox,oy},cell);
         const cv::Mat original=image.clone();
         auto data=cv::makePtr<calib::calibrationData>(); data->imageSize=nativeSize;
         calib::captureParameters parameters; parameters.board=calib::Chessboard; parameters.boardSize=options.board;
-        parameters.squareSize=options.squareMm; parameters.captureDelay=1; parameters.fps=1; parameters.templDst=295;
+        parameters.squareSize=options.tagMm; parameters.captureDelay=1; parameters.fps=1; parameters.templDst=295;
         BoardProcessor detector(data,parameters);
-        require(detector.observe(image),"Native-resolution rendered chessboard not detected");
-        std::vector<cv::Point2f> expected;
-        for(int y=0;y<8;++y) for(int x=0;x<11;++x) expected.emplace_back(ox+(x+1)*cell-0.5f,oy+(y+1)*cell-0.5f);
+        require(detector.observe(image),"Native-resolution rendered AprilGrid not detected");
         require(cornerMotion(expected,detector.points())<0.15,"Downsampled search failed to restore native subpixel coordinates");
         auto reversed=detector.points(); std::reverse(reversed.begin(),reversed.end());
         std::vector<Sample> one{{detector.points(),"pose.png",0}};
@@ -128,7 +126,7 @@ int main() {
         require(static_cast<int>(report["image_width"])==1280 && static_cast<int>(report["image_height"])==960,"Export lost native dimensions");
         require(report["board_poses"].size()==8 && cv::norm(loadedK,solution.data->cameraMatrix)==0,"Export lost retained observations or parameters");
         cv::Mat preview(size,CV_8UC3,cv::Scalar(70,70,70));
-        cv::drawChessboardCorners(preview,options.board,solution.samples.front().points,true);
+        aprilgrid::draw(preview,solution.samples.front().points);
         const auto screen=dashboard(preview,options,solution.samples,solution,false,true,false,"Updated; move board to a new pose",&detectedBoard,true,999);
         require(cv::imwrite((options.output/"dashboard.png").string(),screen),"Cannot render dashboard");
         std::cout<<"Dashboard: "<<options.output/"dashboard.png"<<'\n';

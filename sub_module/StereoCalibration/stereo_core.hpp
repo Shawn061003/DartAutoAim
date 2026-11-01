@@ -1,6 +1,7 @@
 #pragma once
 #include "Acquisition/CameraInput.h"
 #include "stereo_translation_constraint.hpp"
+#include "../aprilgrid.hpp"
 #include <opencv2/opencv.hpp>
 #include <filesystem>
 #include <chrono>
@@ -9,10 +10,18 @@
 #include <vector>
 namespace fs = std::filesystem;
 namespace stereo_calibration {
-constexpr int kColumns=11,kRows=8;
-constexpr float kSquareMm=30.F;
+constexpr int kColumns=aprilgrid::kColumns,kRows=aprilgrid::kRows;
 inline const cv::Size kFrameSize(1440,1080);
 struct Camera { cv::Mat K, D; cv::Size referenceSize; };
+struct MonocularFit {
+    Camera camera;
+    double rms=std::numeric_limits<double>::quiet_NaN();
+    cv::Mat perViewErrors;
+    std::vector<cv::Mat> rvecs,tvecs;
+};
+MonocularFit FitMonocular(const std::vector<std::vector<cv::Point2f>>&,cv::Size);
+void WriteMonocularReport(const fs::path&,const MonocularFit&,
+    const std::vector<std::vector<cv::Point2f>>&,const std::vector<fs::path>&);
 struct Pair {
     std::size_t group;
     int number;
@@ -49,6 +58,9 @@ struct Epipolar {
 };
 struct Solution {
     std::vector<LivePair> pairs;
+    // 与本轮图对、外参和误差一同保存，避免显示/导出时混用旧配置内参。
+    MonocularFit leftFit,rightFit;
+    bool intrinsicsRefitted=false;
     cv::Mat R,T,E,F,errors;
     std::vector<Epipolar> perPair;
     double rms=std::numeric_limits<double>::quiet_NaN(),epiRms=0,epiP95=0,epiMax=0;
@@ -59,8 +71,9 @@ Camera Intrinsics(const CameraParams&,const fs::path&);
 std::uint64_t TimestampDifference(std::int64_t,std::int64_t);
 bool AlignRight(const std::vector<cv::Point2f>&,std::vector<cv::Point2f>&);
 Epipolar MeasureEpipolar(const std::vector<cv::Point2f>&,const std::vector<cv::Point2f>&,const Camera&,const Camera&,const cv::Mat&);
-Solution Solve(std::vector<LivePair>,const Camera&,const Camera&,int);
-Solution UnconstrainedSolution(const Solution&,const Camera&,const Camera&,int);
+Solution Solve(std::vector<LivePair>,cv::Size,cv::Size,int);
+Solution SolveFixedIntrinsics(std::vector<LivePair>,const Camera&,const Camera&,int);
+Solution UnconstrainedSolution(const Solution&,int);
 std::size_t Worst(const Solution&);
-void Save(const Options&,const Camera&,const Camera&,const Solution&);
+void Save(const Options&,const Solution&);
 } // namespace stereo_live

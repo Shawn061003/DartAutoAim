@@ -4,7 +4,7 @@
 // 用法：stereo_calibrate [left_dir right_dir output_dir [left_yaml right_yaml]]
 // 全幅模式：stereo_calibrate --full-frame left_image_dir right_image_dir output_dir [left_yaml right_yaml]
 // 输出目录必须不存在。退出码：0=通过基本质量检查，2=已保存诊断结果但质量不合格，1=程序错误。
-// 采集前提：相机之间的位姿固定，且每对左右图中的棋盘必须保持同一位姿。
+// 采集前提：相机之间的位姿固定，且每对左右图中的标定板必须保持同一位姿。
 #include <opencv2/opencv.hpp>
 #include "stereo_core.hpp"
 #include "Acquisition/AcquireFrame.h"
@@ -94,75 +94,46 @@ std::map<int, fs::path> IndexFiles(const fs::path& dir, const std::string& side)
     return files;
 }
 bool Detect(const cv::Mat& image, std::vector<cv::Point2f>& points, bool realtime = false, int realtimeMaxEdge = 1600) {
-    cv::Mat gray; cv::cvtColor(image, gray, cv::COLOR_BGR2GRAY);
-    if (realtime) {
-        // Try the cheap overview first. A second, finer search preserves distant-board cells on the left.
-        // Keep both searches bounded: no exhaustive full-sensor fallback when the board is missing.
-        for (const int edge : {1600,realtimeMaxEdge}) {
-            const double scale=std::min(1.,static_cast<double>(edge)/std::max(gray.cols,gray.rows));
-            cv::Mat coarse;
-            if (scale<1.) cv::resize(gray,coarse,{},scale,scale,cv::INTER_AREA);
-            else coarse=gray;
-            points.clear();
-            bool found=cv::findChessboardCorners(coarse,{kColumns,kRows},points,
-                cv::CALIB_CB_ADAPTIVE_THRESH | cv::CALIB_CB_NORMALIZE_IMAGE | cv::CALIB_CB_FAST_CHECK);
-            if (!found && realtimeMaxEdge>1600 && (edge>=realtimeMaxEdge || scale==1.)) {
-                // The sector-based detector recovers small boards missed by threshold/contour search.
-                points.clear();
-                found=cv::findChessboardCornersSB(coarse,{kColumns,kRows},points,cv::CALIB_CB_NORMALIZE_IMAGE);
-            }
-            if (found && points.size()==kColumns*kRows) {
-                for (auto& p:points) {
-                    p.x*=static_cast<float>(gray.cols)/coarse.cols;
-                    p.y*=static_cast<float>(gray.rows)/coarse.rows;
-                }
-                int window=11;
-                if (realtimeMaxEdge>1600) {
-                    // An 11-pixel half-window crosses neighbouring corners on a small, distant board.
-                    double spacing=std::numeric_limits<double>::infinity();
-                    for (int row=0;row<kRows;++row) for (int col=0;col<kColumns;++col) {
-                        const int i=row*kColumns+col;
-                        if (col+1<kColumns) spacing=std::min(spacing,cv::norm(points[i+1]-points[i]));
-                        if (row+1<kRows) spacing=std::min(spacing,cv::norm(points[i+kColumns]-points[i]));
-                    }
-                    window=std::clamp(static_cast<int>(std::floor(spacing*.4)),1,11);
-                }
-                cv::cornerSubPix(gray,points,{window,window},{-1,-1},
-                    {cv::TermCriteria::COUNT | cv::TermCriteria::EPS,50,.001});
-                return true;
-            }
-            if (edge>=realtimeMaxEdge || scale==1.) break;
-        }
-        points.clear(); return false;
-    }
-    cv::Rect search(0,0,gray.cols,gray.rows);
-    // 全幅图先低分辨率定位棋盘，再回到原分辨率局部重检，最终角点未经缩放。
-    if (gray.cols > 2000 || gray.rows > 2000) {
-        const double scale=1600./std::max(gray.cols,gray.rows);
-        cv::Mat coarse; cv::resize(gray,coarse,{},scale,scale,cv::INTER_AREA);
-        std::vector<cv::Point2f> initial;
-        if (cv::findChessboardCornersSB(coarse,{kColumns,kRows},initial,
-            cv::CALIB_CB_NORMALIZE_IMAGE | cv::CALIB_CB_EXHAUSTIVE | cv::CALIB_CB_ACCURACY)) {
-            for (auto& p:initial) { p.x*=static_cast<float>(gray.cols)/coarse.cols; p.y*=static_cast<float>(gray.rows)/coarse.rows; }
-            auto box=cv::boundingRect(initial);
-            const int margin=std::max(64, std::max(box.width,box.height)/4);
-            search=cv::Rect(box.x-margin,box.y-margin,box.width+2*margin,box.height+2*margin)&search;
-        }
-    }
-    const auto region=gray(search);
-    bool found = cv::findChessboardCornersSB(region, {kColumns, kRows}, points,
-        cv::CALIB_CB_NORMALIZE_IMAGE | cv::CALIB_CB_EXHAUSTIVE | cv::CALIB_CB_ACCURACY);
-    if (!found) {
-        points.clear();
-        found = cv::findChessboardCorners(region, {kColumns, kRows}, points,
-            cv::CALIB_CB_ADAPTIVE_THRESH | cv::CALIB_CB_NORMALIZE_IMAGE);
-    }
-    if (found) {
-        for (auto& p:points) p+=cv::Point2f(static_cast<float>(search.x),static_cast<float>(search.y));
-        cv::cornerSubPix(gray, points, {7,7}, {-1,-1},
-            {cv::TermCriteria::COUNT | cv::TermCriteria::EPS, 50, .001});
-    }
-    return found && points.size() == kColumns * kRows;
+    (void)realtime; (void)realtimeMaxEdge;
+    // 原生分辨率检测；返回顺序由ID决定，不随板姿态或检测遍历顺序变化。
+    return aprilgrid::detect(image,points);
+}
+
+MonocularFit FitMonocular(const std::vector<std::vector<cv::Point2f>>& points,cv::Size size) {
+    Require(points.size()>=3 && !size.empty(),"Monocular fit needs at least 3 views and native image size");
+    const auto board=aprilgrid::objectPoints();
+    for(const auto& view:points) Require(view.size()==board.size(),"Incomplete AprilGrid in monocular fit");
+    MonocularFit result;result.camera.referenceSize=size;
+    std::vector<std::vector<cv::Point3f>> objects(points.size(),board);
+    // 两侧各自从当前图片初始化，使用五参数畸变；不沿用配置中的旧K/D。
+    result.camera.K=cv::Mat::eye(3,3,CV_64F);
+    result.camera.D=cv::Mat::zeros(5,1,CV_64F);
+    result.rms=cv::calibrateCamera(objects,points,size,result.camera.K,result.camera.D,
+        result.rvecs,result.tvecs,cv::noArray(),cv::noArray(),result.perViewErrors,0,
+        {cv::TermCriteria::COUNT|cv::TermCriteria::EPS,100,1e-9});
+    Require(std::isfinite(result.rms) && cv::checkRange(result.camera.K) && cv::checkRange(result.camera.D) &&
+        result.camera.K.at<double>(0,0)>0 && result.camera.K.at<double>(1,1)>0,
+        "Monocular calibration produced invalid parameters; use more diverse board poses");
+    result.camera.D=result.camera.D.reshape(1,5).clone();
+    return result;
+}
+
+void WriteMonocularReport(const fs::path& path,const MonocularFit& fit,
+    const std::vector<std::vector<cv::Point2f>>& points,const std::vector<fs::path>& images) {
+    Require(points.size()==images.size() && points.size()==fit.rvecs.size(),"Monocular report membership mismatch");
+    cv::FileStorage file(path.string(),cv::FileStorage::WRITE);
+    Require(file.isOpened(),"Cannot write monocular report: "+path.string());
+    aprilgrid::writeSpecification(file);
+    file<<"image_width"<<fit.camera.referenceSize.width<<"image_height"<<fit.camera.referenceSize.height
+        <<"camera_matrix"<<fit.camera.K<<"distortion_coefficients"<<fit.camera.D
+        <<"distortion_order"<<"k1,k2,p1,p2,k3"<<"used_views"<<static_cast<int>(points.size())
+        <<"rms_reprojection_error_px"<<fit.rms<<"per_view_rms_px"<<fit.perViewErrors
+        <<"intrinsics_source"<<"current_selected_stereo_images"<<"calibration_flags"<<0
+        <<"distance_validated"<<0<<"board_poses"<<"[";
+    for(std::size_t i=0;i<points.size();++i)
+        file<<"{"<<"image"<<images[i].string()<<"image_points_reference"<<points[i]
+            <<"rvec"<<fit.rvecs[i]<<"tvec_mm"<<fit.tvecs[i]<<"}";
+    file<<"]";
 }
 
 struct Rectification { cv::Mat leftK, R1, R2, P1, P2, Q; };
@@ -204,10 +175,10 @@ cv::Mat ReferenceRow(const Pair& pair, const Rectification& rect,
     cv::putText(canvas,label,{10,21},cv::FONT_HERSHEY_SIMPLEX,.55,{255,255,255},1);
     cv::putText(canvas,"LEFT | RIGHT   red: corresponding corners; green: epipolar guides; display scale=0.5",
                 {10,42},cv::FONT_HERSHEY_SIMPLEX,.43,{200,200,200},1);
-    // 诊断结果可能把棋盘校正到视野外；同时提供原图角点，保留可核查证据。
+    // 诊断结果可能把标定板校正到视野外；同时提供原图角点，保留可核查证据。
     auto rawLeft=ReadImage(pair.leftPath), rawRight=ReadImage(pair.rightPath);
-    cv::drawChessboardCorners(rawLeft,{kColumns,kRows},local,true);
-    cv::drawChessboardCorners(rawRight,{kColumns,kRows},pair.right,true);
+    aprilgrid::draw(rawLeft,local);
+    aprilgrid::draw(rawRight,pair.right);
     cv::resize(rawLeft,rawLeft,{720,540}); cv::resize(rawRight,rawRight,{720,540});
     cv::Mat rawCanvas(590,1440,CV_8UC3,cv::Scalar(20,20,20));
     rawLeft.copyTo(rawCanvas(cv::Rect(0,50,720,540)));
@@ -257,8 +228,8 @@ cv::Mat FullReferenceRow(const Pair& pair, const Camera& left, const Camera& rig
     cv::putText(canvas,label,{10,21},cv::FONT_HERSHEY_SIMPLEX,.55,{255,255,255},1);
     cv::putText(canvas,"UNDISTORTED CROPS - LEFT | RIGHT; green: epilines; red: corners; NOT stereo-rectified",
                 {10,42},cv::FONT_HERSHEY_SIMPLEX,.43,{200,200,200},1);
-    cv::drawChessboardCorners(rawLeft,{kColumns,kRows},pair.left,true);
-    cv::drawChessboardCorners(rawRight,{kColumns,kRows},pair.right,true);
+    aprilgrid::draw(rawLeft,pair.left);
+    aprilgrid::draw(rawRight,pair.right);
     FitPanel(rawLeft).copyTo(canvas(cv::Rect(0,640,720,540))); FitPanel(rawRight).copyTo(canvas(cv::Rect(720,640,720,540)));
     cv::putText(canvas,"RAW INPUT - LEFT full sensor | RIGHT; aspect ratio preserved; display scales differ",
                 {10,620},cv::FONT_HERSHEY_SIMPLEX,.5,{255,255,255},1);
@@ -287,7 +258,7 @@ int OfflineMain(int argc, char** argv) {
         const fs::path leftYaml = argc==6 ? fs::path(argv[4]) : project/"CalibrationResults/monocular_20261006/left/intrinsics.yaml";
         const fs::path rightYaml = argc==6 ? fs::path(argv[5]) : project/"CalibrationResults/monocular_20261006/right/intrinsics.yaml";
         Require(!fs::exists(output), "Output already exists; choose a new directory: " + output.string());
-        const Camera left = ReadCamera(leftYaml), right = ReadCamera(rightYaml);
+        Camera left = ReadCamera(leftYaml), right = ReadCamera(rightYaml);
         Require(left.referenceSize == cv::Size(5472,3648) && right.referenceSize == kFrameSize,
                 "Expected LEFT full-sensor 5472x3648 and RIGHT raw 1440x1080 calibration");
         if (fullFrame) kGroups={{"full_frame",{0,0},true,left.referenceSize}};
@@ -321,23 +292,22 @@ int OfflineMain(int argc, char** argv) {
                     rejected.push_back(group.label+"/"+std::to_string(item.first));
                     continue;
                 }
-                // 当前近似同向安装的双目：纠正棋盘检测器可能产生的180度序号反转。
-                // 不旋转图片；仅重排右侧角点索引，且在YAML中记录。
-                const auto a=p.left[kColumns-1]-p.left[0], b=p.right[kColumns-1]-p.right[0];
-                if (a.dot(b)<0) { std::reverse(p.right.begin(),p.right.end()); p.rightReversed=true; }
+                // 两侧已按相同ID及标记角点顺序排列，无须反转。
                 for (auto& point:p.left) point+=group.leftOffset;
                 pairs.push_back(std::move(p));
-                std::cout << "Detected " << group.label << '/' << item.first << " (88+88 corners)" << std::endl;
+                std::cout << "Detected " << group.label << '/' << item.first << " (144+144 AprilTag corners)" << std::endl;
             }
         }
         Require(pairs.size()>=3, "Need at least 3 valid image pairs with distinct board poses");
-        std::vector<cv::Point3f> board;
-        for (int y=0;y<kRows;++y) for (int x=0;x<kColumns;++x) board.emplace_back(x*kSquareMm,y*kSquareMm,0);
+        const auto board=aprilgrid::objectPoints();
         std::vector<std::vector<cv::Point3f>> objects(pairs.size(),board);
         std::vector<std::vector<cv::Point2f>> lp,rp;
         for (const auto& p:pairs) { lp.push_back(p.left);rp.push_back(p.right); }
 
-        // 2. 固定K/D，仅优化共同的R/T及每对棋盘位姿。
+        // 2. 用本轮图片分别求左右内参，再固定新K/D优化双目外参。
+        const auto leftMonocular=FitMonocular(lp,left.referenceSize);
+        const auto rightMonocular=FitMonocular(rp,right.referenceSize);
+        left=leftMonocular.camera;right=rightMonocular.camera;
         // imageSize只影响内参初始化；FIX_INTRINSIC下左右图无需拥有相同参考尺寸。
         cv::Mat kl=left.K.clone(), dl=left.D.clone(), kr=right.K.clone(), dr=right.D.clone();
         cv::Mat R,T,E,F,errors;
@@ -402,11 +372,15 @@ int OfflineMain(int argc, char** argv) {
              << "rectification_parameters_available" << static_cast<int>(!fullFrame)
              << "transform_convention" << "X_right_mm = R * X_left_mm + T_mm"
              << "camera_axes" << "x_right,y_down,z_forward"
-             << "intrinsics_policy" << "CALIB_FIX_INTRINSIC" << "exif_orientation" << "ignored"
+             << "intrinsics_policy" << "refit_monocular_then_CALIB_FIX_INTRINSIC" << "exif_orientation" << "ignored"
              << "capture_requirement" << "fixed camera rig; identical board pose during both exposures of each pair"
-             << "board_columns" << kColumns << "board_rows" << kRows << "square_size_mm" << kSquareMm
-             << "left_intrinsics_source" << fs::absolute(leftYaml).string()
-             << "right_intrinsics_source" << fs::absolute(rightYaml).string()
+             << "board_type" << "aprilgrid" << "tag_family" << "tag36h11"
+             << "board_columns" << kColumns << "board_rows" << kRows
+             << "tag_size_mm" << aprilgrid::kTagMm << "tag_gap_mm" << aprilgrid::kGapMm
+             << "marker_border_bits" << aprilgrid::kBorderBits
+             << "id_layout" << "rows_top_to_bottom_ids_right_to_left"
+             << "left_intrinsics_source" << "left_intrinsics.yaml" << "left_monocular_rms_px" << leftMonocular.rms
+             << "right_intrinsics_source" << "right_intrinsics.yaml" << "right_monocular_rms_px" << rightMonocular.rms
              << "left_image_directory" << fs::absolute(leftDir).string()
              << "right_image_directory" << fs::absolute(rightDir).string()
              << "left_reference_width" << left.referenceSize.width << "left_reference_height" << left.referenceSize.height
@@ -452,6 +426,11 @@ int OfflineMain(int argc, char** argv) {
                  << "rectification_alpha" << 0. << "}";
         }
         yaml << "]";
+
+        std::vector<fs::path> leftImages,rightImages;
+        for(const auto& pair:pairs) {leftImages.push_back(pair.leftPath);rightImages.push_back(pair.rightPath);}
+        WriteMonocularReport(output/"left_intrinsics.yaml",leftMonocular,lp,leftImages);
+        WriteMonocularReport(output/"right_intrinsics.yaml",rightMonocular,rp,rightImages);
 
         // 5. 一张参考图包含各组中位误差样本及全局最差样本，避免只展示最好的一对。
         std::vector<std::size_t> referenceIndices;
@@ -521,7 +500,7 @@ Options Parse(int argc, char** argv) {
     if (parser.has("help")) {
         parser.printMessage();
         std::cout << "Live: stereo_calibrate [--config=...] [--left-intrinsics=... --right-intrinsics=...]\n"
-                  << "Board: 11x8 INNER corners, 30 mm squares. Both cameras must see the same stationary board.\n"
+                  << "Board: 6x6 tag36h11, 88 mm tags, 26.4 mm gaps, borderBits=2, IDs 0..35. Both cameras must see the same stationary board.\n"
                   << "Offline: stereo_calibrate --offline --full-frame LEFT_DIR RIGHT_DIR NEW_OUTPUT [LEFT_YAML RIGHT_YAML]\n"
                   << "Keys: SPACE=capture (stable required), A=auto/manual, R=undo, X=remove worst pair, D=clear, S=save, E=epilines, ESC/Q=exit.\n"
                   << "Exit: 0=basic checks passed; 2=diagnostics/incomplete session; 1=error.\n";
@@ -603,14 +582,12 @@ public:
     }
 };
 
-// Same near-parallel-rig convention as the existing offline calibration, with recorded reordering.
+// ID排序已建立左右对应关系；保留调用接口，不再按图像朝向反转角点。
 bool AlignRight(const std::vector<cv::Point2f>& left,std::vector<cv::Point2f>& right) {
-    Require(left.size()==kColumns*kRows && right.size()==left.size(),"Incomplete corresponding checkerboards");
-    if((left[kColumns-1]-left[0]).dot(right[kColumns-1]-right[0])<0) {
-        std::reverse(right.begin(),right.end()); return true;
-    }
+    Require(left.size()==aprilgrid::kPointCount && right.size()==left.size(),"Incomplete corresponding AprilGrids");
     return false;
 }
+
 struct Observation {
     StereoFrame frame;
     std::vector<cv::Point2f> left,right;
@@ -703,7 +680,8 @@ void UpdateEpipolarMetrics(Solution& result,const Camera& left,const Camera& rig
     result.epiRms=std::sqrt(squared/maxErrors.size()); result.epiP95=Quantile(maxErrors,.95);
     result.epiMax=*std::max_element(maxErrors.begin(),maxErrors.end());
 }
-Solution UnconstrainedSolution(const Solution& bounded,const Camera& left,const Camera& right,int minimumPairs) {
+Solution UnconstrainedSolution(const Solution& bounded,int minimumPairs) {
+    const auto& left=bounded.leftFit.camera;const auto& right=bounded.rightFit.camera;
     const auto& initial=bounded.translationConstraint;
     Require(initial.initialR.size()==cv::Size(3,3) && initial.initialT.total()==3 &&
         initial.initialE.size()==cv::Size(3,3) && initial.initialF.size()==cv::Size(3,3) &&
@@ -711,17 +689,18 @@ Solution UnconstrainedSolution(const Solution& bounded,const Camera& left,const 
         cv::checkRange(initial.initialR) && cv::checkRange(initial.initialT) && cv::checkRange(initial.initialE) &&
         cv::checkRange(initial.initialF) && cv::checkRange(initial.initialErrors) && std::isfinite(initial.initialRms),
         "Original unconstrained calibration snapshot is incomplete");
-    Solution result;result.pairs=bounded.pairs;
+    Solution result=bounded;
     result.R=initial.initialR;result.T=initial.initialT;result.E=initial.initialE;result.F=initial.initialF;
     result.errors=initial.initialErrors;result.rms=initial.initialRms;
     UpdateEpipolarMetrics(result,left,right);
     result.passed=result.pairs.size()>=static_cast<std::size_t>(minimumPairs) && result.rms<=kMaxRmsPx && result.epiP95<=kMaxEpipolarP95Px;
     return result;
 }
-Solution Solve(std::vector<LivePair> pairs,const Camera& left,const Camera& right,int minimumPairs) {
+Solution SolveFixedIntrinsics(std::vector<LivePair> pairs,const Camera& left,const Camera& right,int minimumPairs) {
     Solution result; result.pairs=std::move(pairs); if(result.pairs.size()<3) return result;
-    std::vector<cv::Point3f> board;
-    for(int y=0;y<kRows;++y) for(int x=0;x<kColumns;++x) board.emplace_back(x*kSquareMm,y*kSquareMm,0);
+    result.leftFit.camera={left.K.clone(),left.D.clone(),left.referenceSize};
+    result.rightFit.camera={right.K.clone(),right.D.clone(),right.referenceSize};
+    const auto board=aprilgrid::objectPoints();
     std::vector<std::vector<cv::Point3f>> objects(result.pairs.size(),board);
     std::vector<std::vector<cv::Point2f>> lp,rp;
     for(const auto& p:result.pairs) {
@@ -743,6 +722,16 @@ Solution Solve(std::vector<LivePair> pairs,const Camera& left,const Camera& righ
     result.passed=result.translationConstraint.converged && result.pairs.size()>=static_cast<std::size_t>(minimumPairs) && result.rms<=kMaxRmsPx && result.epiP95<=kMaxEpipolarP95Px;
     return result;
 }
+// 每次使用同一个选择快照完成左单目、右单目、固定新内参的双目求解。
+Solution Solve(std::vector<LivePair> pairs,cv::Size leftSize,cv::Size rightSize,int minimumPairs) {
+    if(pairs.size()<3) {Solution empty;empty.pairs=std::move(pairs);return empty;}
+    std::vector<std::vector<cv::Point2f>> lp,rp;
+    for(const auto& pair:pairs) {lp.push_back(pair.pair.left);rp.push_back(pair.pair.right);}
+    auto left=FitMonocular(lp,leftSize),right=FitMonocular(rp,rightSize);
+    auto result=SolveFixedIntrinsics(std::move(pairs),left.camera,right.camera,minimumPairs);
+    result.leftFit=std::move(left);result.rightFit=std::move(right);result.intrinsicsRefitted=true;
+    return result;
+}
 std::size_t Worst(const Solution& s) {
     Require(!s.R.empty() && !s.perPair.empty(),"No valid solution to select a worst pair");
     std::size_t worst=0; double maximum=-1;
@@ -754,7 +743,8 @@ std::size_t Worst(const Solution& s) {
 }
 
 // Prepare both result variants before publishing the completed files.
-void PrepareReport(const Options& o,const Camera& left,const Camera& right,const Solution& s,bool constrained) {
+void PrepareReport(const Options& o,const Solution& s,bool constrained) {
+    const auto& left=s.leftFit.camera;const auto& right=s.rightFit.camera;
     const std::string stem=constrained?"stereo":"stereo_unconstrained";
     const std::string referenceStem=constrained?"reference":"reference_unconstrained";
     Require(!s.R.empty(),"Need at least 3 solved pairs before saving stereo.yaml");
@@ -780,10 +770,14 @@ void PrepareReport(const Options& o,const Camera& left,const Camera& right,const
         <<"quality_passed"<<static_cast<int>(s.passed)<<"distance_validated"<<0
         <<"capture_mode"<<o.captureMode<<"rectification_parameters_available"<<0
         <<"transform_convention"<<"X_right_mm = R * X_left_mm + T_mm"<<"camera_axes"<<"x_right,y_down,z_forward"
-        <<"intrinsics_policy"<<"CALIB_FIX_INTRINSIC"<<"config_source"<<fs::absolute(o.config).string()
-        <<"left_intrinsics_source"<<(o.leftIntrinsics.empty()?"dart.yaml:cameras.left":fs::absolute(o.leftIntrinsics).string())
-        <<"right_intrinsics_source"<<(o.rightIntrinsics.empty()?"dart.yaml:cameras.right":fs::absolute(o.rightIntrinsics).string())
-        <<"board_columns"<<kColumns<<"board_rows"<<kRows<<"square_size_mm"<<kSquareMm
+        <<"intrinsics_policy"<<(s.intrinsicsRefitted?"refit_monocular_then_CALIB_FIX_INTRINSIC":"CALIB_FIX_INTRINSIC")<<"config_source"<<fs::absolute(o.config).string()
+        <<"left_intrinsics_source"<<(s.intrinsicsRefitted?"left_intrinsics.yaml":(o.leftIntrinsics.empty()?"dart.yaml:cameras.left":fs::absolute(o.leftIntrinsics).string()))
+        <<"right_intrinsics_source"<<(s.intrinsicsRefitted?"right_intrinsics.yaml":(o.rightIntrinsics.empty()?"dart.yaml:cameras.right":fs::absolute(o.rightIntrinsics).string()))
+        <<"board_type"<<"aprilgrid"<<"tag_family"<<"tag36h11"
+        <<"board_columns"<<kColumns<<"board_rows"<<kRows
+        <<"tag_size_mm"<<aprilgrid::kTagMm<<"tag_gap_mm"<<aprilgrid::kGapMm
+        <<"marker_border_bits"<<aprilgrid::kBorderBits
+        <<"id_layout"<<"rows_top_to_bottom_ids_right_to_left"
         <<"left_reference_width"<<left.referenceSize.width<<"left_reference_height"<<left.referenceSize.height
         <<"right_reference_width"<<right.referenceSize.width<<"right_reference_height"<<right.referenceSize.height
         <<"K_left_reference"<<left.K<<"D_left"<<left.D<<"K_right"<<right.K<<"D_right"<<right.D
@@ -797,8 +791,12 @@ void PrepareReport(const Options& o,const Camera& left,const Camera& right,const
         <<"max_host_timestamp_diff_ms"<<static_cast<int>(o.pairMs)<<"stationary_hold_seconds"<<o.holdSeconds
         <<"timestamp_semantics"<<"host steady_clock receive time; not exposure synchronization"
         <<"capture_requirement"<<"fixed rig; same stationary board pose during both exposures"
-        <<"corner_alignment"<<"near-parallel rig: reverse right 180-degree ordering if row directions oppose"
+        <<"corner_alignment"<<"AprilTag ID ascending, decoded TL/TR/BR/BL; no reversal"
         <<"reference_image"<<(referenceStem+".png")<<"rectification_by_left_roi"<<"["<<"]";
+    if(s.intrinsicsRefitted)
+        yaml<<"left_monocular_rms_px"<<s.leftFit.rms<<"right_monocular_rms_px"<<s.rightFit.rms
+            <<"left_monocular_per_view_rms_px"<<s.leftFit.perViewErrors
+            <<"right_monocular_per_view_rms_px"<<s.rightFit.perViewErrors;
     if(constrained) {
         WriteTranslationConstraint(yaml,s.translationConstraint);
         yaml<<"unconstrained_result_file"<<"stereo_unconstrained.yaml";
@@ -824,14 +822,26 @@ void PrepareReport(const Options& o,const Camera& left,const Camera& right,const
     }
     yaml<<"]"; yaml.release();
 }
-void Save(const Options& o,const Camera& left,const Camera& right,const Solution& s) {
-    const auto unconstrained=UnconstrainedSolution(s,left,right,o.minPairs);
-    PrepareReport(o,left,right,s,true);
-    PrepareReport(o,left,right,unconstrained,false);
+void Save(const Options& o,const Solution& s) {
+    const auto unconstrained=UnconstrainedSolution(s,o.minPairs);
+    PrepareReport(o,s,true);
+    PrepareReport(o,unconstrained,false);
+    if(s.intrinsicsRefitted) {
+        std::vector<std::vector<cv::Point2f>> lp,rp;
+        std::vector<fs::path> leftImages,rightImages;
+        for(const auto& pair:s.pairs) {
+            lp.push_back(pair.pair.left);rp.push_back(pair.pair.right);
+            leftImages.push_back(pair.pair.leftPath);rightImages.push_back(pair.pair.rightPath);
+        }
+        WriteMonocularReport(o.output/"left_intrinsics.pending.yaml",s.leftFit,lp,leftImages);
+        WriteMonocularReport(o.output/"right_intrinsics.pending.yaml",s.rightFit,rp,rightImages);
+    }
     for(const auto& stem:{std::string("reference"),std::string("reference_unconstrained")})
         fs::rename(o.output/(stem+".pending.png"),o.output/(stem+".png"));
     for(const auto& stem:{std::string("stereo"),std::string("stereo_unconstrained")})
         fs::rename(o.output/(stem+".pending.yaml"),o.output/(stem+".yaml"));
+    if(s.intrinsicsRefitted) for(const auto* side:{"left","right"})
+        fs::rename(o.output/(std::string(side)+"_intrinsics.pending.yaml"),o.output/(std::string(side)+"_intrinsics.yaml"));
     std::cout<<"Saved "<<o.output/"stereo.yaml"<<"; pairs="<<s.pairs.size()<<" RMS="<<s.rms
              <<" px epipolar P95="<<s.epiP95<<" px baseline="<<cv::norm(s.T)<<" mm; quality="<<s.passed<<'\n'
              <<"Saved "<<o.output/"stereo_unconstrained.yaml"<<"; RMS="<<unconstrained.rms
@@ -864,7 +874,7 @@ cv::Mat Preview(const cv::Mat& raw,const std::vector<cv::Point2f>& points,const 
         }
     }
     for(auto& point:displayed) { point.x*=sx; point.y*=sy; }
-    if(displayed.size()==kColumns*kRows) cv::drawChessboardCorners(image,{kColumns,kRows},displayed,true);
+    if(displayed.size()==aprilgrid::kPointCount) aprilgrid::draw(image,displayed);
     image.copyTo(pane(cv::Rect((pane.cols-image.cols)/2,(pane.rows-image.rows)/2,image.cols,image.rows)));
     return pane;
 }
@@ -890,8 +900,10 @@ cv::Mat Dashboard(const Observation& observed,const Camera& left,const Camera& r
         "  #"+std::to_string(observed.frame.left.frame_id),12,27);
     Label(canvas,"RIGHT "+std::to_string(right.referenceSize.width)+"x"+std::to_string(right.referenceSize.height)+
         "  #"+std::to_string(observed.frame.right.frame_id),732,27);
-    Preview(observed.frame.left.image,observed.left,left,observed.right,right,solved.F,true,epilines).copyTo(canvas(cv::Rect(0,40,720,480)));
-    Preview(observed.frame.right.image,observed.right,right,observed.left,left,solved.F,false,epilines).copyTo(canvas(cv::Rect(720,40,720,480)));
+    const auto& previewLeft=solved.R.empty()?left:solved.leftFit.camera;
+    const auto& previewRight=solved.R.empty()?right:solved.rightFit.camera;
+    Preview(observed.frame.left.image,observed.left,previewLeft,observed.right,previewRight,solved.F,true,epilines).copyTo(canvas(cv::Rect(0,40,720,480)));
+    Preview(observed.frame.right.image,observed.right,previewRight,observed.left,previewLeft,solved.F,false,epilines).copyTo(canvas(cv::Rect(720,40,720,480)));
     Label(canvas,"Pairs: "+std::to_string(pairs.size())+" / "+std::to_string(o.maxPairs)+
         "   Capture: "+(automatic?"AUTO":"MANUAL")+"   Worker: "+(busy?"BUSY":"READY"),15,550);
     Label(canvas,epilines?"View: UNDISTORTED + EPILINES (NOT rectified)":"View: RAW + detected corners; display scales differ",15,578);
@@ -911,13 +923,13 @@ cv::Mat Dashboard(const Observation& observed,const Camera& left,const Camera& r
     Label(canvas,status.substr(0,155),15,730,{80,220,255});
     Label(canvas,"LEFT native corner coverage",15,759); Label(canvas,"RIGHT native corner coverage",435,759);
     Coverage(canvas,pairs,left,true,15,775); Coverage(canvas,pairs,right,false,435,775);
-    Label(canvas,"Fixed K/D; |Tx|=450..570, |Ty|<=60, |Tz|<=160 mm",830,790);
+    Label(canvas,"Mono refit -> stereo; |Tx|=450..570, |Ty|<=60, |Tz|<=160",830,790);
     if (!solved.T.empty()) {
         Label(canvas,"T mm: "+Number(solved.T.at<double>(0),2)+", "+Number(solved.T.at<double>(1),2)+", "+Number(solved.T.at<double>(2),2),830,914);
         Label(canvas,"Free RMS="+Number(solved.translationConstraint.initialRms)+"; bounded RMS="+Number(solved.rms)+
             (solved.translationConstraint.atLimit?"; AT LIMIT":""),830,945);
     }
-    Label(canvas,"11x8 inner corners; 30 mm squares",830,821);
+    Label(canvas,"6x6 tag36h11; 88 mm tags; gap 26.4 mm",830,821);
     Label(canvas,"Pause the SAME board during both exposures",830,852);
     Label(canvas,"Receive timestamps are NOT exposure sync",830,883,{80,170,255});
     Label(canvas,"SPACE: capture (stable required) | A: auto/manual | R: undo | X: drop worst | D: clear",15,979);
@@ -948,7 +960,7 @@ int Run(Options o) {
         <<"; pair receive-time limit="<<o.pairMs<<" ms\nK_left:\n"<<left.K<<"\nK_right:\n"<<right.K
         <<"\nIntrinsics: "<<(o.leftIntrinsics.empty()?"dart.yaml:cameras.left":o.leftIntrinsics.string())<<" | "
         <<(o.rightIntrinsics.empty()?"dart.yaml:cameras.right":o.rightIntrinsics.string())
-        <<"\nBoard: 11x8 INNER corners, 30 mm squares. Fixed K/D; no equal-focal constraint.\n"
+        <<"\nBoard: 6x6 tag36h11, 88 mm tags, 26.4 mm gaps, borderBits=2, IDs 0..35. Refit both monocular K/D, then fix them for stereo.\n"
         <<"Translation bounds (right optical frame, mm): |Tx|=450..570 (initial sign), |Ty|<=60, |Tz|<=160.\n"
         <<"Keep rig fixed, pause board for sampling. Receive-time pairing is NOT hardware exposure sync.\nOutput: "<<o.output<<'\n';
     cv::namedWindow(kWindow,cv::WINDOW_NORMAL); cv::resizeWindow(kWindow,1440,1020);
@@ -970,7 +982,7 @@ int Run(Options o) {
         const auto snapshot=pairs;
         pending=std::async(std::launch::async,[snapshot,left,right,o,added,raw] {
             if(added) WriteFrames(*added,raw);
-            return Solve(snapshot,left,right,o.minPairs);
+            return Solve(snapshot,left.referenceSize,right.referenceSize,o.minPairs);
         });
         stability.reset(); lastError.clear();
     };
@@ -990,7 +1002,7 @@ int Run(Options o) {
             std::cout<<"Unconstrained T_mm="<<solved.translationConstraint.initialT.t()<<" RMS="<<solved.translationConstraint.initialRms
                      <<" px; bounded T_mm="<<solved.T.t()<<" RMS="<<solved.rms<<" px; converged="<<solved.translationConstraint.converged
                      <<" at_limit="<<solved.translationConstraint.atLimit<<'\n';
-            if(observed.leftFound && observed.rightFound) current=MeasureEpipolar(observed.left,observed.right,left,right,solved.F);
+            if(observed.leftFound && observed.rightFound) current=MeasureEpipolar(observed.left,observed.right,solved.leftFit.camera,solved.rightFit.camera,solved.F);
         }
         status=jobIsSave?"Saved stereo.yaml and median/worst reference images":"Updated; move board to another pose";
         stability.reset();
@@ -1009,7 +1021,7 @@ int Run(Options o) {
                 const bool fresh=nowMs>=receiveTime && nowMs-receiveTime<=2000;
                 const bool complete=observed.leftFound && observed.rightFound;
                 current.reset();
-                if(complete && !solved.R.empty()) current=MeasureEpipolar(observed.left,observed.right,left,right,solved.F);
+                if(complete && !solved.R.empty()) current=MeasureEpipolar(observed.left,observed.right,solved.leftFit.camera,solved.rightFit.camera,solved.F);
                 if(pending.valid() || !fresh) {
                     stability.reset(); status=pending.valid()?"Saving/solving in background; capture paused":"Processed pair too old; wait for a fresh stationary board";
                 } else {
@@ -1047,7 +1059,7 @@ int Run(Options o) {
                 if(pending.valid() || solvedRevision!=revision || solved.R.empty()) status="Wait for an updated solution with at least 3 pairs";
                 else {
                     pendingRevision=revision; jobIsSave=true; const auto snapshot=solved;
-                    pending=std::async(std::launch::async,[o,left,right,snapshot] { Save(o,left,right,snapshot); return snapshot; });
+                    pending=std::async(std::launch::async,[o,snapshot] { Save(o,snapshot); return snapshot; });
                     status="Saving report and native-image reference panels"; stability.reset();
                 }
             }
@@ -1065,7 +1077,7 @@ int Run(Options o) {
         camera.stop();
         if(detecting.valid()) detecting.get();
         if(pending.valid()) finishJob();
-        if(solvedRevision==revision && !solved.R.empty() && savedRevision!=revision) Save(o,left,right,solved);
+        if(solvedRevision==revision && !solved.R.empty() && savedRevision!=revision) Save(o,solved);
         cv::destroyWindow(kWindow);
         if(solvedRevision!=revision || solved.R.empty()) {
             std::cout<<"No current stereo solution. Accepted original pairs remain in "<<o.output<<'\n'; return 2;

@@ -1,5 +1,6 @@
 #define DART_CALIBRATION_NO_MAIN
 #include "../sub_module/Calibration/demarcate.cpp"
+#include "aprilgrid_fixture.hpp"
 
 namespace {
 void check(bool ok,const std::string& message) {if(!ok) throw std::runtime_error(message);}
@@ -16,7 +17,7 @@ int main() {
         Options o;o.side="left";o.model="full";o.input=root/"Input";o.output=root/"Results";o.minViews=4;o.maxViews=12;
         const cv::Size size(2000,1400);const int ox=500,oy=400,cell=40;
         cv::Mat board(size,CV_8UC3,cv::Scalar(220,220,220));
-        for(int y=0;y<9;++y) for(int x=0;x<12;++x) cv::rectangle(board,{ox+x*cell,oy+y*cell,cell,cell},(x+y)%2?cv::Scalar(255,255,255):cv::Scalar(0,0,0),cv::FILLED);
+        const auto expected=renderAprilGrid(board,{ox,oy},cell);
         const cv::Mat original=board.clone();const cv::Rect roi(ox-20,oy-20,520,400);
         MonoWriter writer(o);CameraFrame frame;frame.image=board;frame.frame_id=121;frame.timestamp_ms=456;
         check(writer.append(frame)==1,"Cannot collect native BMP");
@@ -24,10 +25,22 @@ int main() {
         const auto loaded=cv::imread((o.input/"000001.bmp").string());check(loaded.size()==size && cv::norm(loaded,original)==0,"BMP changed raw pixels");
         bool refused=false;try {MonoWriter duplicate(o);}catch(const std::runtime_error&){refused=true;}check(refused,"Existing data was not protected");
         const auto dataset=readDataset(o);check(dataset.records.size()==2 && dataset.records.front().sample.frameId==121,"Frame manifest identity lost");
-        std::vector<cv::Point2f> points,expected;
+        std::vector<cv::Point2f> points;
         check(detectRoi(loaded,roi,o.board,points),"Native ROI board not found");
-        for(int y=0;y<8;++y) for(int x=0;x<11;++x) expected.emplace_back(ox+(x+1)*cell-.5f,oy+(y+1)*cell-.5f);
         check(cornerMotion(points,expected)<.15 && cv::norm(board,original)==0,"ROI/native offset or subpixel coordinates incorrect");
+        const auto physical=aprilgrid::objectPoints();
+        check(physical.size()==144 && cv::norm(physical[0]-cv::Point3f(572,0,0))<.001 &&
+              cv::norm(physical[2]-cv::Point3f(660,88,0))<.001 &&
+              cv::norm(physical[20]-cv::Point3f(0,0,0))<.001 &&
+              cv::norm(physical[143]-cv::Point3f(0,660,0))<.001,"Physical ID layout or millimetre scale incorrect");
+        cv::Mat rotated;cv::rotate(original,rotated,cv::ROTATE_180);
+        check(aprilgrid::detect(rotated,points),"Rotated AprilGrid not detected");
+        for(std::size_t i=0;i<points.size();++i)
+            check(cv::norm(points[i]-cv::Point2f(size.width-1-expected[i].x,size.height-1-expected[i].y))<.2,
+                  "Image rotation changed ID/corner correspondence");
+        cv::Mat incomplete=original.clone();
+        incomplete(cv::Rect(ox+5*(cell+cvRound(.3*cell)),oy,cell,cell)).setTo(cv::Scalar(220,220,220));
+        check(!aprilgrid::detect(incomplete,points) && points.empty(),"Missing ID accepted as a full board");
         check(!detectRoi(frame.image,roi,o.board,points) && points.empty(),"Blank ROI retained stale corners");
         MonoViewport view;view.reset(size);const cv::Point2d native(700,600),screen=view.project(native);
         view.magnify(screen,2);check(cv::norm(view.unproject(screen)-native)<1e-8,"Zoom lost cursor anchor");
@@ -35,9 +48,9 @@ int main() {
         const auto parse=[](std::vector<std::string> args) {
             std::vector<char*> argv;for(auto& arg:args) argv.push_back(arg.data());return parseOptions(static_cast<int>(argv.size()),argv.data());
         };
-        check(parse({"demarcate","--collect","--side=right"}).mode==Options::Mode::Collect &&
-              parse({"demarcate","--calibration","--side=left"}).input.filename()=="left","Two-mode CLI/default camera directory incorrect");
-        bool ambiguous=false;try {parse({"demarcate","--collect","--calibration","--side=left"});}catch(const std::invalid_argument&){ambiguous=true;}
+        check(parse({"calibration","--collect","--side=right"}).mode==Options::Mode::Collect &&
+              parse({"calibration","--calibration","--side=left"}).input.filename()=="left","Two-mode CLI/default camera directory incorrect");
+        bool ambiguous=false;try {parse({"calibration","--collect","--calibration","--side=left"});}catch(const std::invalid_argument&){ambiguous=true;}
         check(ambiguous,"Ambiguous modes accepted");
         calibration_ui::PointerInput gtk;gtk.gtk=true;gtk.point(cv::EVENT_MOUSEMOVE,500,300);
         check(gtk.point(cv::EVENT_MOUSEHWHEEL,0,0)==cv::Point2d(500,300) && gtk.direction(-65536)==1 && gtk.direction(65536)==-1 && gtk.direction(0)==0,
@@ -85,7 +98,7 @@ int main() {
         auto synthetic=readDataset(fit);
         for(int i=0;i<9;++i) {
             auto& r=synthetic.records[i];r.state=MonoRecord::State::Accepted;r.roi={0,0,fitSize.width,fitSize.height};
-            cv::projectPoints(object,cv::Vec3d(-.22+.07*(i%4),.18-.09*(i%5),.03*(i%3)),cv::Vec3d(-240+110*(i%4),-170+120*(i/4),900+60*(i%3)),k,cv::Mat::zeros(5,1,CV_64F),r.sample.points);
+            cv::projectPoints(object,cv::Vec3d(-.22+.07*(i%4),.18-.09*(i%5),.03*(i%3)),cv::Vec3d(-240+110*(i%4),-170+120*(i/4),1800+60*(i%3)),k,cv::Mat::zeros(5,1,CV_64F),r.sample.points);
         }
         saveAnnotations(fit,synthetic);MonoReview fitting(fit);fitting.update();fitting.finish();
         check(fitting.solution().samples.size()==9 && fitting.solution().data->totalAvgErr<.01,"Offline fit lost selection or has high RMS");
@@ -98,7 +111,7 @@ int main() {
         auto listData=readDataset(list);
         for(auto& r:listData.records) {
             r.state=MonoRecord::State::Accepted;r.roi={0,0,64,48};
-            for(int y=0;y<8;++y) for(int x=0;x<11;++x) r.sample.points.emplace_back(4+4*x,4+4*y);
+            for(const auto& p:aprilgrid::objectPoints()) r.sample.points.emplace_back(4+.08f*p.x,4+.05f*p.y);
         }
         saveAnnotations(list,listData);MonoReview listApp(list);
         listApp.mouse(cv::EVENT_MOUSEMOVE,1200,600,0);

@@ -19,7 +19,7 @@ struct Settings {
     Mode mode=Mode::Calibration;
     fs::path config=fs::path(DART_PROJECT_ROOT)/"config/dart.yaml";
     fs::path input=fs::path(DART_PROJECT_ROOT)/"sub_module/StereoCalibration/Input";
-    fs::path output,leftIntrinsics,rightIntrinsics;
+    fs::path output;
     int pairMs=-1,minPairs=10,maxPairs=30;
     double interval=1.;
     bool help=false;
@@ -27,13 +27,11 @@ struct Settings {
 inline Settings ParseSettings(int argc,char** argv) {
     cv::CommandLineParser parser(argc,argv,
         "{help h | | Show help without opening cameras}"
-        "{collect | | Collect receive-time paired native BMPs; no chessboard detection}"
+        "{collect | | Collect receive-time paired native BMPs; no target detection}"
         "{calibration | | Offline paired-image ROI annotation and bounded stereo calibration}"
         "{config | | dart.yaml path}"
         "{input | | Dataset root containing left/ and right/; default: StereoCalibration/Input}"
         "{output | | NEW calibration result directory}"
-        "{left-intrinsics | | Optional monocular intrinsics.yaml}"
-        "{right-intrinsics | | Optional monocular intrinsics.yaml}"
         "{pair-ms | -1 | Collection receive-time tolerance; default: dart.yaml}"
         "{interval | 1.0 | Seconds between automatic saved BMP pairs}"
         "{min-pairs | 10 | Minimum pairs for quality checks}"
@@ -43,14 +41,14 @@ inline Settings ParseSettings(int argc,char** argv) {
         parser.printMessage();
         std::cout<<"./build/stereo_calibration --collect [--pair-ms=20 --interval=1]\n"
                  <<"./build/stereo_calibration --calibration [--input=/path/to/Input]\n"
-                 <<"Board: 11 columns x 8 rows INNER corners, 30 mm squares. Fixed K/D.\n"
+                 <<"Board: 6x6 tag36h11, 88 mm tags, 26.4 mm gaps, borderBits=2. Refit left/right K/D, then fix them for stereo.\n"
                  <<"Bounds in RIGHT optical frame (right/down/forward): |Tx|=450..570, |Ty|<=60, |Tz|<=160 mm.\n"
                  <<"Collection: A=auto/pause, SPACE=save pair, ESC/Q=quit.\n"
                  <<"Calibration: LMB=ROI, wheel=zoom, RMB click=zoom in, Shift+RMB=zoom out, RMB drag=pan, SPACE=accept+next, N=skip, B=back, P=next,\n"
-                 <<"R=clear ROIs, D=remove from fit, F=reverse right corner order, U=undo, S=save, 0=reset zoom, 1/2=L zoom, 3/4=R zoom, [/]=list scroll, ESC/Q=quit.\n";
+                 <<"R=clear ROIs, D=remove from fit, U=undo, S=save, 0=reset zoom, 1/2=L zoom, 3/4=R zoom, [/]=list scroll, ESC/Q=quit.\n";
         s.help=true;return s;
     }
-    const std::vector<std::string> known{"collect","calibration","config","input","output","left-intrinsics","right-intrinsics","pair-ms","interval","min-pairs","max-pairs"};
+    const std::vector<std::string> known{"collect","calibration","config","input","output","pair-ms","interval","min-pairs","max-pairs"};
     for (int i=1;i<argc;++i) {
         const std::string arg=argv[i];const auto equal=arg.find('=');
         Require(arg.rfind("--",0)==0,"Use --collect / --calibration and --name=value options");
@@ -63,7 +61,7 @@ inline Settings ParseSettings(int argc,char** argv) {
     s.mode=parser.has("collect")?Settings::Mode::Collect:Settings::Mode::Calibration;
     if(parser.has("config")) s.config=parser.get<std::string>("config");
     if(parser.has("input")) s.input=parser.get<std::string>("input");
-    s.output=parser.get<std::string>("output");s.leftIntrinsics=parser.get<std::string>("left-intrinsics");s.rightIntrinsics=parser.get<std::string>("right-intrinsics");
+    s.output=parser.get<std::string>("output");
     s.pairMs=parser.get<int>("pair-ms");s.interval=parser.get<double>("interval");
     s.minPairs=parser.get<int>("min-pairs");s.maxPairs=parser.get<int>("max-pairs");
     Require(parser.check(),"Invalid command-line value");
@@ -210,7 +208,8 @@ inline std::string FileStamp(const fs::path& p) {
 inline void SaveAnnotations(const fs::path& path,const std::vector<Record>& records) {
     const auto pending=path.parent_path()/(path.stem().string()+".pending.yaml");
     cv::FileStorage f(pending.string(),cv::FileStorage::WRITE);Require(f.isOpened(),"Cannot save annotations");
-    f<<"schema_version"<<1<<"columns"<<kColumns<<"rows"<<kRows<<"square_mm"<<kSquareMm<<"records"<<"[";
+    aprilgrid::writeSpecification(f);
+    f<<"schema_version"<<2<<"records"<<"[";
     for(const auto& r:records) {
         f<<"{"<<"id"<<r.key<<"state"<<static_cast<int>(r.state)<<"left_file"<<r.sample.pair.leftPath.filename().string()
          <<"right_file"<<r.sample.pair.rightPath.filename().string()<<"left_stamp"<<FileStamp(r.sample.pair.leftPath)<<"right_stamp"<<FileStamp(r.sample.pair.rightPath)
@@ -220,14 +219,14 @@ inline void SaveAnnotations(const fs::path& path,const std::vector<Record>& reco
     f<<"]";f.release();fs::rename(pending,path);
 }
 inline bool ValidCorners(const std::vector<cv::Point2f>& points,cv::Size size) {
-    if(points.size()!=kColumns*kRows) return false;
+    if(points.size()!=aprilgrid::kPointCount) return false;
     return std::all_of(points.begin(),points.end(),[&](const cv::Point2f& p){return std::isfinite(p.x) && std::isfinite(p.y) && p.x>=0 && p.y>=0 && p.x<size.width && p.y<size.height;});
 }
 inline void LoadAnnotations(const fs::path& path,std::vector<Record>& records,cv::Size left,cv::Size right) {
     if(!fs::exists(path)) return;
     cv::FileStorage f(path.string(),cv::FileStorage::READ);Require(f.isOpened(),"Cannot read annotations");
-    Require(static_cast<int>(f["schema_version"])==1 && static_cast<int>(f["columns"])==kColumns && static_cast<int>(f["rows"])==kRows &&
-        std::abs(static_cast<double>(f["square_mm"])-kSquareMm)<1e-6,"Annotation board specification mismatch");
+    Require(static_cast<int>(f["schema_version"])==2 && aprilgrid::matchesSpecification(f),
+        "Annotation AprilGrid specification mismatch; reannotate old checkerboard datasets");
     std::map<std::string,Record*> byKey;for(auto& r:records) byKey[r.key]=&r;
     for(const auto& n:f["records"]) {
         const auto it=byKey.find(static_cast<std::string>(n["id"]));if(it==byKey.end()) continue;
@@ -277,18 +276,8 @@ struct Viewport {
 };
 inline bool DetectRoi(const cv::Mat& raw,cv::Rect roi,std::vector<cv::Point2f>& points) {
     points.clear();if(raw.empty() || roi.width<24 || roi.height<24 || (roi&cv::Rect({},raw.size()))!=roi) return false;
-    cv::Mat gray;cv::cvtColor(raw(roi),gray,cv::COLOR_BGR2GRAY);
-    // Native ROI only: no whole-image fallback and no loss of tiny distant-board details.
-    bool found=cv::findChessboardCornersSB(gray,{kColumns,kRows},points,cv::CALIB_CB_NORMALIZE_IMAGE);
-    if(!found) {points.clear();found=cv::findChessboardCorners(gray,{kColumns,kRows},points,cv::CALIB_CB_ADAPTIVE_THRESH|cv::CALIB_CB_NORMALIZE_IMAGE|cv::CALIB_CB_FAST_CHECK);}
-    if(!found || points.size()!=kColumns*kRows) {points.clear();return false;}
-    double spacing=1e9;
-    for(int y=0;y<kRows;++y) for(int x=0;x<kColumns;++x) {
-        const int i=y*kColumns+x;if(x+1<kColumns) spacing=std::min(spacing,cv::norm(points[i+1]-points[i]));
-        if(y+1<kRows) spacing=std::min(spacing,cv::norm(points[i+kColumns]-points[i]));
-    }
-    const int half=std::clamp(static_cast<int>(std::floor(spacing*.35)),1,9);
-    cv::cornerSubPix(gray,points,{half,half},{-1,-1},{cv::TermCriteria::COUNT|cv::TermCriteria::EPS,50,.001});
+    // 只检测框选的原生ROI，按ID返回144个角点，再恢复全图坐标。
+    if(!aprilgrid::detect(raw(roi),points)) return false;
     for(auto& p:points) p+=cv::Point2f(static_cast<float>(roi.x),static_cast<float>(roi.y));
     if(!ValidCorners(points,raw.size())) {points.clear();return false;}return true;
 }

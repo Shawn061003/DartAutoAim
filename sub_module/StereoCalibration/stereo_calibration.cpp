@@ -24,7 +24,7 @@ void DrawView(cv::Mat& canvas,const cv::Mat& raw,const Viewport& view,cv::Rect r
     if(!corners.empty()) {
         std::vector<cv::Point2f> display;
         for(const auto& p:corners) display.emplace_back(view.project(p)-offset);
-        cv::drawChessboardCorners(pane,{kColumns,kRows},display,corners.size()==kColumns*kRows);
+        aprilgrid::draw(pane,display);
         for(const auto i:{std::size_t(0),corners.size()-1}) cv::putText(pane,std::to_string(i),display[i]+cv::Point2f(5,-5),cv::FONT_HERSHEY_SIMPLEX,.5,kYellow,1,cv::LINE_AA);
     }
 }
@@ -35,7 +35,7 @@ const std::vector<Button>& Buttons() {
         {{385,835,145,42},"上一组 [B]",'b'},{{540,835,145,42},"下一组 [P]",'p'},
         {{695,835,180,42},"撤销接受 [U]",'u'},{{885,835,180,42},"保存结果 [S]",'s'},
         {{15,895,210,42},"清除两侧 ROI [R]",'r'},{{235,895,210,42},"移出标定 [D]",'d'},
-        {{455,895,220,42},"反转右侧角点顺序 [F]",'f'},{{685,895,190,42},"重置缩放 [0]",'0'},
+        {{685,895,190,42},"重置缩放 [0]",'0'},
         {{885,895,180,42},"退出 [Q]",'q'},
         {{15,716,85,28},"左 + [1]",'1'},{{110,716,85,28},"左 - [2]",'2'},
         {{685,716,85,28},"右 + [3]",'3'},{{780,716,85,28},"右 - [4]",'4'},
@@ -78,7 +78,7 @@ cv::Mat CollectionDashboard(const std::optional<StereoFrame>& latest,std::size_t
     Label(canvas,automatic?"自动保存":"已暂停",1300,125,kYellow);
     Label(canvas,"间隔："+Number(interval,1)+" 秒",1300,155);
     Label(canvas,"配对上限："+std::to_string(pairMs)+" ms",1300,225);
-    Label(canvas,"采集时不检测棋盘",1300,270);
+    Label(canvas,"采集时不检测AprilGrid",1300,270);
     Label(canvas,"接收配对 ≠ 曝光同步",1300,305,kYellow);
     Label(canvas,status.substr(0,145),15,735,kYellow);
     Label(canvas,"A：自动/暂停 | 空格：保存下一组 | Q/ESC：退出；退出时等待图片保存完成",15,785);
@@ -147,7 +147,7 @@ class Review {
         detected_={};++epoch_;needDetection_=!rawLeft_.empty() && !rawRight_.empty();persist();
     }
     Options reportOptions() const {
-        Options o;o.config=settings_.config;o.output=settings_.output;o.leftIntrinsics=settings_.leftIntrinsics;o.rightIntrinsics=settings_.rightIntrinsics;
+        Options o;o.config=settings_.config;o.output=settings_.output;
         o.captureMode="offline_manual_roi_native_full_frames";o.minPairs=settings_.minPairs;o.maxPairs=settings_.maxPairs;o.holdSeconds=0;o.pairMs=dataset_.pairMs;return o;
     }
     void load(std::size_t index) {
@@ -157,7 +157,7 @@ class Review {
             const auto& r=current();rawLeft_=cv::imread(r.sample.pair.leftPath.string(),cv::IMREAD_COLOR|cv::IMREAD_IGNORE_ORIENTATION);
             rawRight_=cv::imread(r.sample.pair.rightPath.string(),cv::IMREAD_COLOR|cv::IMREAD_IGNORE_ORIENTATION);
             Require(!rawLeft_.empty() && !rawRight_.empty(),"当前 BMP 图片组无法读取，请跳过");
-            Require(rawLeft_.size()==left_.referenceSize && rawRight_.size()==right_.referenceSize,"图片尺寸与内参标定尺寸不一致，请跳过或选择匹配的内参");
+            Require(rawLeft_.size()==left_.referenceSize && rawRight_.size()==right_.referenceSize,"图片尺寸与本组原生尺寸不一致，请跳过");
             views_[0].reset(rawLeft_.size());views_[1].reset(rawRight_.size());
             detected_.left=r.sample.pair.left;detected_.right=r.sample.pair.right;detected_.reversed=r.sample.pair.rightReversed;
             detected_.leftFound=ValidCorners(detected_.left,rawLeft_.size());detected_.rightFound=ValidCorners(detected_.right,rawRight_.size());
@@ -171,12 +171,12 @@ class Review {
         needFit_=false;const auto snapshot=Selected(dataset_.records);const auto revision=revision_;
         if(snapshot.size()<3) {solved_={};solvedRevision_=revision_;return;}
         const auto left=left_,right=right_;const int minimum=settings_.minPairs;
-        fitting_=std::async(std::launch::async,[snapshot,revision,left,right,minimum] {return std::make_pair(revision,Solve(snapshot,left,right,minimum));});
+        fitting_=std::async(std::launch::async,[snapshot,revision,left,right,minimum] {return std::make_pair(revision,Solve(snapshot,left.referenceSize,right.referenceSize,minimum));});
     }
     void finishFit() {
         auto result=fitting_.get();if(result.first!=revision_) return;
         solved_=std::move(result.second);solvedRevision_=revision_;
-        std::cout<<"Fit pairs:";for(const auto& p:solved_.pairs) std::cout<<' '<<p.pair.number;
+        std::cout<<"Monocular RMS left="<<solved_.leftFit.rms<<" right="<<solved_.rightFit.rms<<"; Fit pairs:";for(const auto& p:solved_.pairs) std::cout<<' '<<p.pair.number;
         std::cout<<"; RMS="<<solved_.rms<<" epi P95="<<solved_.epiP95<<" T_mm="<<solved_.T.t()
                  <<"; free T_mm="<<solved_.translationConstraint.initialT.t()<<" free RMS="<<solved_.translationConstraint.initialRms<<'\n';
     }
@@ -184,9 +184,9 @@ class Review {
         persist();
         if(saving_.valid()) {status_="结果仍在保存，请稍候";return;}
         if(solved_.R.empty() || solvedRevision_!=revision_) {status_="标注已保存；至少接受 3 组图片并完成求解后才能保存结果";return;}
-        const auto snapshot=solved_;const auto options=reportOptions();const auto left=left_,right=right_;const auto rev=revision_;
-        saving_=std::async(std::launch::async,[snapshot,options,left,right,rev] {Save(options,left,right,snapshot);return rev;});
-        status_="后台保存有约束和无约束标定结果";
+        const auto snapshot=solved_;const auto options=reportOptions();const auto rev=revision_;
+        saving_=std::async(std::launch::async,[snapshot,options,rev] {Save(options,snapshot);return rev;});
+        status_="后台保存左右新内参、有约束和无约束双目结果";
     }
 public:
     Review(Settings settings,Camera left,Camera right):settings_(std::move(settings)),left_(std::move(left)),right_(std::move(right)),dataset_(ReadDataset(settings_.input)) {
@@ -206,7 +206,7 @@ public:
     std::size_t currentIndex() const {return index_;}
     void update() {
         if(saving_.valid() && saving_.wait_for(std::chrono::seconds(0))==std::future_status::ready) {
-            try {savedRevision_=saving_.get();status_=savedRevision_==revision_?"已保存两种标定结果及参考图":"已保存上一版结果；当前选择已改变";}
+            try {savedRevision_=saving_.get();status_=savedRevision_==revision_?"已保存左右新内参、双目结果及参考图":"已保存上一版结果；当前选择已改变";}
             catch(const std::exception& e){status_=std::string("结果保存失败：")+e.what();}
         }
         if(fitting_.valid() && fitting_.wait_for(std::chrono::seconds(0))==std::future_status::ready) {
@@ -218,7 +218,7 @@ public:
                 auto result=detection_.get();
                 if(result.index==index_ && result.epoch==epoch_) {
                     detected_=std::move(result);auto& r=current();r.sample.pair.left=detected_.left;r.sample.pair.right=detected_.right;r.sample.pair.rightReversed=detected_.reversed;
-                    status_=detected_.leftFound && detected_.rightFound?"两侧均已找到棋盘：核对角点 0/87 是否对应；空格接受，F 反转右侧顺序":"一侧 ROI 内未找到完整棋盘；请框全棋盘并保留白边，或按 N 跳过";persist();
+                    status_=detected_.leftFound && detected_.rightFound?"两侧均已找到36个AprilTag，已按ID对应；空格接受":"一侧 ROI 内未找到完整AprilGrid；请框全AprilGrid并保留白边，或按 N 跳过";persist();
                 }
             }catch(const std::exception& e){status_=std::string("ROI 检测失败：")+e.what();}
         }
@@ -246,13 +246,8 @@ public:
         if(key=='n') {++epoch_;needDetection_=false;const bool included=r.state==Record::State::Accepted;r.state=Record::State::Skipped;if(included) changed();else persist();advance();return;}
         if(key=='d') {if(r.state==Record::State::Accepted) {r.state=Record::State::Pending;changed();status_="已移出当前图片组，保留标注";}return;}
         if(key=='r') {r.leftRoi={};r.rightRoi={};invalidateCurrent();needDetection_=false;status_="两侧 ROI 已清除，请重新框选";return;}
-        if(key=='f' && detected_.rightFound && !detection_.valid() && !needDetection_) {
-            std::reverse(detected_.right.begin(),detected_.right.end());detected_.reversed=!detected_.reversed;
-            r.sample.pair.right=detected_.right;r.sample.pair.rightReversed=detected_.reversed;
-            if(r.state==Record::State::Accepted) changed();else persist();status_="已反转右侧角点顺序，请核对同编号是否为同一个实际角点";return;
-        }
         if(key==' ') {
-            if(detection_.valid() || needDetection_ || !detected_.leftFound || !detected_.rightFound || r.leftRoi.empty() || r.rightRoi.empty()) {status_="两侧 ROI 均须检测到完整的 88 个角点才能接受";return;}
+            if(detection_.valid() || needDetection_ || !detected_.leftFound || !detected_.rightFound || r.leftRoi.empty() || r.rightRoi.empty()) {status_="两侧 ROI 均须检测到完整的144个AprilTag角点才能接受";return;}
             if(r.state!=Record::State::Accepted) {
                 if(count(Record::State::Accepted)>=settings_.maxPairs) {status_="已达图片组数上限，请先移除已纳入的一组";return;}
                 r.state=Record::State::Accepted;undo_.push_back(index_);changed();
@@ -289,7 +284,7 @@ public:
         }
         if(event==cv::EVENT_LBUTTONUP && drag_>=0) {
             const int chosen=drag_;drag_=-1;const auto roi=views_[chosen].roi(start_,point);
-            if(roi.width<24 || roi.height<24) {status_="ROI 太小，请放大后框选完整棋盘";return;}
+            if(roi.width<24 || roi.height<24) {status_="ROI 太小，请放大后框选完整AprilGrid";return;}
             if(chosen==0) current().leftRoi=roi;else current().rightRoi=roi;
             invalidateCurrent();status_="正在后台检测所选 ROI 内的原始分辨率角点";
         }
@@ -311,7 +306,7 @@ public:
         Label(canvas,status_.substr(0,145),15,770,kYellow);
         Label(canvas,std::string("ROI 检测：")+(detection_.valid()?"处理中":"就绪")+"；上次 "+Number(detected_.milliseconds,0)+" ms；左/右："+
             (detected_.leftFound?"已找到":"未找到")+" / "+(detected_.rightFound?"已找到":"未找到"),15,798);
-        Label(canvas,"左键框选 ROI；滚轮缩放；右键单击放大、拖动平移；Shift+右键缩小；接受前核对角点 0 / 87",15,825);
+        Label(canvas,"左键框选 ROI；滚轮缩放；右键单击放大、拖动平移；Shift+右键缩小；接受前核对ID 0 / 35及标记四角",15,825);
         for(const auto& b:Buttons()) {cv::rectangle(canvas,b.box,{65,65,65},cv::FILLED);Label(canvas,b.caption,b.box.x+8,b.box.y+26,kWhite,.47);}
         Label(canvas,"标注自动保存到 Input/annotations.yaml；BMP 原图和角点均保留原始坐标",15,972,kGreen,.5);
         cv::line(canvas,{1355,0},{1355,999},{75,75,75});const int x=1370;
@@ -325,7 +320,7 @@ public:
             Label(canvas,"基线长度："+Number(cv::norm(solved_.T),2)+" mm",x,201);
             Label(canvas,"T mm: "+Number(solved_.T.at<double>(0),1)+", "+Number(solved_.T.at<double>(1),1)+", "+Number(solved_.T.at<double>(2),1),x,229);
             for(int row=0;row<3;++row) Label(canvas,(row==0?"R: ":"   ")+Number(solved_.R.at<double>(row,0),5)+" "+Number(solved_.R.at<double>(row,1),5)+" "+Number(solved_.R.at<double>(row,2),5),x,257+row*27,kWhite,.46);
-            Label(canvas,"无约束 RMS："+Number(solved_.translationConstraint.initialRms)+" px",x,339);
+            Label(canvas,"单目 RMS 左/右："+Number(solved_.leftFit.rms,2)+" / "+Number(solved_.rightFit.rms,2)+" px",x,339);
             Label(canvas,solved_.translationConstraint.atLimit?"T：接近约束边界":"T：位于约束范围内",x,366,solved_.translationConstraint.atLimit?kYellow:kGreen);
             Label(canvas,solved_.passed?"质量检查通过（测距尚未验证）":"质量检查未通过：数量、误差或收敛状态",x,393,solved_.passed?kGreen:kYellow,.43);
         } else Label(canvas,count(Record::State::Accepted)<3?"接受至少 3 组图片后显示 RMS":"等待当前数据的求解结果",x,120,kYellow);
@@ -347,13 +342,22 @@ public:
         persist();if(detection_.valid()) {try{detection_.get();}catch(const std::exception& e){std::cerr<<e.what()<<'\n';}}
         for(;;) {if(fitting_.valid()) finishFit();startFit();if(!fitting_.valid()) break;}
         if(saving_.valid()) savedRevision_=saving_.get();
-        if(!solved_.R.empty() && solvedRevision_==revision_ && savedRevision_!=revision_) Save(reportOptions(),left_,right_,solved_);
+        if(!solved_.R.empty() && solvedRevision_==revision_ && savedRevision_!=revision_) Save(reportOptions(),solved_);
         std::cout<<"Annotations: "<<settings_.input/"annotations.yaml"<<"; reports: "<<settings_.output<<'\n';
         return solved_.passed?0:2;
     }
 };
 int Calibrate(const Settings& settings) {
-    const DartCongfig config(settings.config.string());const auto left=Intrinsics(config.leftCamera,settings.leftIntrinsics),right=Intrinsics(config.rightCamera,settings.rightIntrinsics);
+    // 离线模式从图片读取原生尺寸，内参由每轮选中的角点重新求解，无须旧配置内参。
+    const auto data=ReadDataset(settings.input);
+    Camera left,right;
+    for(const auto& record:data.records) {
+        const auto li=cv::imread(record.sample.pair.leftPath.string(),cv::IMREAD_COLOR|cv::IMREAD_IGNORE_ORIENTATION);
+        const auto ri=cv::imread(record.sample.pair.rightPath.string(),cv::IMREAD_COLOR|cv::IMREAD_IGNORE_ORIENTATION);
+        if(li.empty() || ri.empty()) continue;
+        left.referenceSize=li.size();right.referenceSize=ri.size();break;
+    }
+    Require(!left.referenceSize.empty() && !right.referenceSize.empty(),"No decodable paired BMPs in dataset");
     cv::setNumThreads(4);CameraStopSignals signals;Review app(settings,left,right);
     std::cout<<"Offline ROI calibration. No cameras are opened. Input="<<settings.input<<" output="<<settings.output<<'\n';
     cv::namedWindow(kReviewWindow,cv::WINDOW_NORMAL);cv::resizeWindow(kReviewWindow,1620,900);cv::setMouseCallback(kReviewWindow,Review::Mouse,&app);

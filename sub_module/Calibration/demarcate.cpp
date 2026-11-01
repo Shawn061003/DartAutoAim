@@ -1,7 +1,8 @@
 // Single-camera BMP collection + offline manual ROI calibration.
 // Upstream support code and license: opencv_interactive_calibration/README.md.
-// ./build/demarcate --collect / --calibration --side=left
+// ./build/calibration --collect / --calibration --side=left
 #include "../calibration_ui.hpp"
+#include "../aprilgrid.hpp"
 #include "Acquisition/CameraInput.h"
 #include "Acquisition/Quit.h"
 #include "common/DartConfig.h"
@@ -45,8 +46,8 @@ struct Options {
     fs::path config = fs::path(DART_PROJECT_ROOT) / "config/dart.yaml";
     fs::path input, output;
     std::string side, model = "auto";
-    cv::Size board{11, 8};
-    double squareMm = 30, interval = 1.;
+    cv::Size board{aprilgrid::kColumns, aprilgrid::kRows};
+    double tagMm = aprilgrid::kTagMm, interval = 1.;
     int minViews = 10, maxViews = 30;
     bool automatic = true;
 };
@@ -63,23 +64,23 @@ Options parseOptions(int argc, char** argv)
         "{output | | New calibration result directory}"
         "{interval | 1.0 | Seconds between automatic saved BMPs}"
         "{model | auto | auto, full, narrow or k1}"
-        "{cols | 11 | Chessboard inner corner columns}"
-        "{rows | 8 | Chessboard inner corner rows}"
-        "{square-mm | 30 | Physical square side in millimetres}"
+        "{cols | 6 | AprilGrid tag columns (fixed 6)}"
+        "{rows | 6 | AprilGrid tag rows (fixed 6)}"
+        "{tag-mm | 88 | AprilTag black outer side in millimetres (fixed 88)}"
         "{min-views | 10 | Minimum views for quality evaluation}"
         "{max-views | 30 | Maximum selected views}"
         "{auto | true | Start collection with automatic frame saving enabled}");
     if (parser.has("help")) {
         parser.printMessage();
-        std::cout << "./build/demarcate --collect --side=left [--interval=1]\n"
-                     "./build/demarcate --calibration --side=left [--input=/path/to/BMPs]\n"
+        std::cout << "./build/calibration --collect --side=left [--interval=1]\n"
+                     "./build/calibration --calibration --side=left [--input=/path/to/BMPs]\n"
                      "Collection: A=auto/pause, SPACE=save next frame, Q/ESC=quit.\n"
                      "Offline: LMB=ROI, wheel=zoom, RMB click=zoom in, Shift+RMB=zoom out, RMB drag=pan, SPACE=accept+next,\n"
                      "N=skip, B/P=previous/next, R=clear ROI, D=remove, U=undo, S=save, +/-=zoom, [/]=list scroll, 0=reset zoom.\n";
         return {};
     }
     const std::vector<std::string> keys{"collect", "calibration", "config", "side", "input", "output", "interval",
-        "model", "cols", "rows", "square-mm", "min-views", "max-views", "auto"};
+        "model", "cols", "rows", "tag-mm", "min-views", "max-views", "auto"};
     for (int i=1; i<argc; ++i) {
         const std::string arg=argv[i]; const auto equal=arg.find('=');
         if (arg.rfind("--",0)!=0) throw std::invalid_argument("Use --collect / --calibration and --name=value options");
@@ -93,14 +94,14 @@ Options parseOptions(int argc, char** argv)
     o.mode=parser.has("collect")?Options::Mode::Collect:Options::Mode::Calibration;
     if (parser.has("config")) o.config=parser.get<std::string>("config");
     o.side=parser.get<std::string>("side"); o.model=parser.get<std::string>("model");
-    o.board={parser.get<int>("cols"),parser.get<int>("rows")}; o.squareMm=parser.get<double>("square-mm");
+    o.board={parser.get<int>("cols"),parser.get<int>("rows")}; o.tagMm=parser.get<double>("tag-mm");
     o.interval=parser.get<double>("interval"); o.minViews=parser.get<int>("min-views"); o.maxViews=parser.get<int>("max-views");
     o.automatic=parser.get<bool>("auto");
     if (!parser.check()) {parser.printErrors();throw std::invalid_argument("Invalid command line");}
     if (o.side!="left" && o.side!="right") throw std::invalid_argument("--side=left or --side=right is required");
     if (o.model!="auto" && o.model!="full" && o.model!="narrow" && o.model!="k1") throw std::invalid_argument("Invalid --model");
-    if (o.board.width<3 || o.board.height<3 || o.board.width>100 || o.board.height>100 ||
-        !std::isfinite(o.squareMm) || o.squareMm<=0 || o.squareMm>10000 ||
+    if (o.board!=cv::Size(aprilgrid::kColumns,aprilgrid::kRows) ||
+        !std::isfinite(o.tagMm) || std::abs(o.tagMm-aprilgrid::kTagMm)>1e-6 ||
         !std::isfinite(o.interval) || o.interval<.1 || o.interval>3600 ||
         o.minViews<3 || o.maxViews<o.minViews || o.maxViews>100)
         throw std::invalid_argument("Invalid board, interval or view count limits");
@@ -149,7 +150,7 @@ public:
     }
 };
 
-// Keep the upstream chessboard detection, object-point generation and angle check.
+// AprilGrid检测与ID顺序共用实物板定义，保留原有角度质量检查。
 // Only frame-count-based intake is replaced by wall-clock stability and pose diversity.
 class BoardProcessor : public calib::CalibProcessor {
 public:
@@ -157,11 +158,14 @@ public:
         : calib::CalibProcessor(data, params) {}
     bool observe(cv::Mat& annotated) {
         mCurrentImagePoints.clear(); mTemplateLocations.clear();
-        return detectAndParseChessboard(annotated);
+        const bool found=aprilgrid::detect(annotated,mCurrentImagePoints);
+        if(found) aprilgrid::draw(annotated,mCurrentImagePoints);
+        return found;
     }
     const std::vector<cv::Point2f>& points() const { return mCurrentImagePoints; }
     bool acceptableAngle() {
-        saveFrameData();
+        mCalibData->imagePoints.push_back(mCurrentImagePoints);
+        mCalibData->objectPoints.push_back(aprilgrid::objectPoints());
         const bool rejected = checkLastFrame();
         if (!rejected) { mCalibData->imagePoints.pop_back(); mCalibData->objectPoints.pop_back(); }
         return !rejected;
@@ -262,10 +266,8 @@ int modelFlags(const std::string& model) {
 }
 
 std::vector<cv::Point3f> objectTemplate(const Options& o) {
-    std::vector<cv::Point3f> points;
-    for (int y = 0; y < o.board.height; ++y) for (int x = 0; x < o.board.width; ++x)
-        points.emplace_back(x * o.squareMm, y * o.squareMm, 0);
-    return points;
+    (void)o;
+    return aprilgrid::objectPoints();
 }
 
 Solution solve(const Options& o, cv::Size size, std::vector<Sample> samples, int flags) {
@@ -318,8 +320,8 @@ void saveReport(const Options& o, const Solution& solution) {
     const auto temporary = o.output / "intrinsics.pending.yaml";
     cv::FileStorage file(temporary.string(), cv::FileStorage::WRITE);
     if (!file.isOpened()) throw std::runtime_error("Cannot write calibration report");
+    aprilgrid::writeSpecification(file);
     file << "image_width" << d.imageSize.width << "image_height" << d.imageSize.height
-         << "board_columns" << o.board.width << "board_rows" << o.board.height << "square_size_mm" << o.squareMm
          << "camera_matrix" << d.cameraMatrix << "distortion_coefficients" << d.distCoeffs.reshape(1,5)
          << "distortion_order" << "k1,k2,p1,p2,k3" << "coordinate_system" << "native_full_image_zero_offset"
          << "camera_side" << o.side << "config_source" << fs::absolute(o.config).string()
