@@ -365,19 +365,22 @@ cv::Mat StereoscopicMeasurementVisualize::Draw(const FrameVisualize& data)
         const auto found = std::find_if(data.targets.begin(), data.targets.end(), [category](const auto& target) {
             return target.target_class == category && finitePosition(target.position_m);
         });
-        label(canvas, "水平距离", {cardX + 18, 143}, kMuted, 15);
-        label(canvas, "相对高度", {cardX + 234, 143}, kMuted, 15);
-        label(canvas, "横向偏移", {cardX + 428, 143}, kMuted, 15);
+        label(canvas, "X", {cardX + 18, 143}, kMuted, 15);
+        label(canvas, "Y", {cardX + 162, 143}, kMuted, 15);
+        label(canvas, "Z", {cardX + 306, 143}, kMuted, 15);
+        label(canvas, "水平距离", {cardX + 450, 143}, kMuted, 15);
         if (found != data.targets.end()) {
             const auto metrics = Metrics(found->position_m);
-            label(canvas, cv::format("%.2f", metrics.horizontal_distance_m),
-                  {cardX + 18, 191}, kText, 36);
-            label(canvas, cv::format("%+.2f", metrics.height_m),
-                  {cardX + 234, 191}, kText, 32);
             label(canvas, cv::format("%+.2f", found->position_m.x),
-                  {cardX + 428, 191}, kText, 32);
+                  {cardX + 18, 191}, kText, 30);
+            label(canvas, cv::format("%+.2f", found->position_m.y),
+                  {cardX + 162, 191}, kText, 30);
+            label(canvas, cv::format("%+.2f", found->position_m.z),
+                  {cardX + 306, 191}, kText, 30);
+            label(canvas, cv::format("%.2f", metrics.horizontal_distance_m),
+                  {cardX + 450, 191}, kText, 30);
         } else {
-            for (const int offset : {18, 234, 428})
+            for (const int offset : {18, 162, 306, 450})
                 label(canvas, "—", {cardX + offset, 188}, kMuted, 30);
             label(canvas, "未发现", {cardX + 520, 111}, kMuted, 16);
         }
