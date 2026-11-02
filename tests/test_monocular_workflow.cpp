@@ -40,8 +40,17 @@ int main() {
                   "Image rotation changed ID/corner correspondence");
         cv::Mat incomplete=original.clone();
         incomplete(cv::Rect(ox+5*(cell+cvRound(.3*cell)),oy,cell,cell)).setTo(cv::Scalar(220,220,220));
-        check(!aprilgrid::detect(incomplete,points) && points.empty(),"Missing ID accepted as a full board");
-        check(!detectRoi(frame.image,roi,o.board,points) && points.empty(),"Blank ROI retained stale corners");
+        aprilgrid::DetectionInfo markers;
+        check(!detectRoi(incomplete,roi,o.board,points,&markers) && points.empty(),"Missing ID accepted as a full board");
+        check(markers.ids.size()==35 && markers.missing()==std::vector<int>{0} && markers.attempts>1 && markers.duplicates.empty(),
+              "Partial detection lost visible/missing IDs or skipped scale retries");
+        for(std::size_t i=0;i<markers.ids.size();++i) for(int j=0;j<4;++j)
+            check(cv::norm(markers.corners[i][j]-expected[4*markers.ids[i]+j])<.2,"Partial diagnostic corners lost native ROI offset");
+        auto overlay=incomplete.clone();aprilgrid::draw(overlay,markers);
+        check(cv::norm(overlay,incomplete)>0 && cv::norm(board,original)==0,"Partial marker overlay missing or changed original image");
+        check(!detectRoi(frame.image,roi,o.board,points,&markers) && points.empty() && markers.ids.empty() && markers.missing().size()==36,
+              "Blank ROI retained stale corners or diagnostic IDs");
+        check(!detectRoi(frame.image,{-1,0,50,50},o.board,points,&markers) && markers.attempts==0,"Invalid ROI retained diagnostics");
         MonoViewport view;view.reset(size);const cv::Point2d native(700,600),screen=view.project(native);
         view.magnify(screen,2);check(cv::norm(view.unproject(screen)-native)<1e-8,"Zoom lost cursor anchor");
         const auto mapped=view.roi(view.project(roi.tl()),view.project(roi.br()));check(mapped==roi,"Zoomed ROI offset incorrect");

@@ -171,13 +171,18 @@ struct MonoViewport {
             cv::Point(static_cast<int>(std::ceil(std::max(a.x,b.x))),static_cast<int>(std::ceil(std::max(a.y,b.y)))))&cv::Rect({},native);
     }
 };
-inline bool detectRoi(const cv::Mat& image,cv::Rect roi,cv::Size board,std::vector<cv::Point2f>& points) {
-    points.clear();if(image.empty() || roi.width<24 || roi.height<24 || (roi&cv::Rect({},image.size()))!=roi) return false;
-    if(board!=cv::Size(aprilgrid::kColumns,aprilgrid::kRows) || !aprilgrid::detect(image(roi),points)) return false;
-    for(auto& p:points) p+=cv::Point2f(static_cast<float>(roi.x),static_cast<float>(roi.y));
+inline bool detectRoi(const cv::Mat& image,cv::Rect roi,cv::Size board,std::vector<cv::Point2f>& points,aprilgrid::DetectionInfo* info=nullptr) {
+    points.clear();if(info) *info={};
+    if(image.empty() || roi.width<24 || roi.height<24 || (roi&cv::Rect({},image.size()))!=roi ||
+       board!=cv::Size(aprilgrid::kColumns,aprilgrid::kRows)) return false;
+    const bool found=aprilgrid::detect(image(roi),points,info);
+    const cv::Point2f offset(static_cast<float>(roi.x),static_cast<float>(roi.y));
+    if(info) info->translate(offset);
+    if(!found) return false;
+    for(auto& p:points) p+=offset;
     if(!validPoints(points,image.size(),board)) {points.clear();return false;}return true;
 }
-struct MonoDetection {std::size_t index=0;std::uint64_t epoch=0;std::vector<cv::Point2f> points;double ms=0;bool found=false;};
+struct MonoDetection {std::size_t index=0;std::uint64_t epoch=0;std::vector<cv::Point2f> points;aprilgrid::DetectionInfo markers;double ms=0;bool found=false;};
 struct MonoButton {cv::Rect box;const char* caption;int key;};
 inline const std::vector<MonoButton>& monoButtons() {
     static const std::vector<MonoButton> buttons{
@@ -208,6 +213,7 @@ class MonoReview {
         raw_=cv::imread(current().path.string(),cv::IMREAD_COLOR|cv::IMREAD_IGNORE_ORIENTATION);
         if(raw_.empty() || raw_.size()!=data_.size) {raw_.release();view_.reset({});status_="图片无法读取或原始尺寸不一致，按 N 跳过";return;}
         view_.reset(raw_.size());detected_.points=current().sample.points;detected_.found=validPoints(detected_.points,data_.size,o_.board);
+        if(detected_.found) detected_.markers=aprilgrid::fromPoints(detected_.points);
         needDetection_=current().state!=MonoRecord::State::Accepted && !current().roi.empty() && !detected_.found;
         status_=current().state==MonoRecord::State::Accepted?"已纳入标定；重新框选后需再次接受":"框选 ROI 并检查角点；空格接受，N 跳过";
     }
@@ -268,7 +274,7 @@ public:
         if(needDetection_ && !detection_.valid()) {
             needDetection_=false;const auto raw=raw_;const auto roi=current().roi;const auto board=o_.board;const auto index=index_;const auto epoch=epoch_;
             detection_=std::async(std::launch::async,[raw,roi,board,index,epoch] {
-                const auto started=Clock::now();MonoDetection d;d.index=index;d.epoch=epoch;d.found=detectRoi(raw,roi,board,d.points);
+                const auto started=Clock::now();MonoDetection d;d.index=index;d.epoch=epoch;d.found=detectRoi(raw,roi,board,d.points,&d.markers);
                 d.ms=std::chrono::duration<double,std::milli>(Clock::now()-started).count();return d;
             });
         }
@@ -353,9 +359,14 @@ public:
             const cv::Point2d offset(view_.area.x,view_.area.y);
             const auto box=drag_?view_.roi(start_,cursor_):r.roi;
             if(!box.empty()) cv::rectangle(pane,view_.project(box.tl())-offset,view_.project(box.br())-offset,{70,215,255},1,cv::LINE_AA);
-            if(detected_.found) {
-                std::vector<cv::Point2f> points;for(const auto& p:detected_.points) points.emplace_back(view_.project(p)-offset);
-                aprilgrid::draw(pane,points);
+            auto markers=detected_.markers;
+            for(auto& marker:markers.corners) for(auto& point:marker) point=view_.project(point)-offset;
+            aprilgrid::draw(pane,markers);
+            if(detected_.markers.attempts || detected_.found) {
+                const auto missing=detected_.markers.missing();
+                calibration_ui::text(pane,"缺失 ID："+aprilgrid::idText(missing,0,18),{10,22},16,{70,215,255});
+                if(missing.size()>18) calibration_ui::text(pane,aprilgrid::idText(missing,18),{10,44},16,{70,215,255});
+                if(!markers.duplicates.empty()) calibration_ui::text(pane,"重复 ID："+aprilgrid::idText(markers.duplicates),{10,66},16,{70,215,255});
             }
         }
         text(canvas,status_.substr(0,140),15,635,{70,215,255});
@@ -363,7 +374,8 @@ public:
         text(canvas,"绿色网格：已纳入图片的角点覆盖区域",10,900);
         text(canvas,"左键框选 ROI；滚轮缩放；右键单击放大、拖动平移",435,670);
         for(const auto& b:monoButtons()) {cv::rectangle(canvas,b.box,{65,65,65},cv::FILLED);text(canvas,b.caption,b.box.x+8,b.box.y+27);}
-        text(canvas,std::string("ROI 检测：")+(detectorBusy()?"处理中":"就绪")+cv::format(" | 上次 %.0f ms",detected_.ms),435,900);
+        text(canvas,std::string("ROI 检测：")+(detectorBusy()?"处理中":"就绪")+" | 识别 "+std::to_string(detected_.markers.ids.size())+"/36"+cv::format(" | %.0f ms",detected_.ms),435,900);
+        text(canvas,cv::format("检测尝试 %d 次 | 采用 %.2fx 尺度",detected_.markers.attempts,detected_.markers.scale),435,927);
         text(canvas,"标注自动保存；Q/ESC 退出并保存当前有效标定结果",15,955);
         text(canvas,"按原始像素求解；请变化标定板位置、大小及倾角；测距精度尚未验证",15,985);
         cv::line(canvas,{1100,0},{1100,999},{75,75,75});int y=30;

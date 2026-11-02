@@ -63,6 +63,14 @@ int main() {
         auto detection=DetectPair(pair.left.image,pair.right.image,lr,rr,7,99);
         Check(detection.index==7 && detection.epoch==99 && detection.leftFound && detection.rightFound &&
               Error(detection.left,expectedLeft)<.2 && Error(detection.right,expectedRight)<.2,"ROI detection lost native coordinates or result generation");
+        cv::Mat partialLeft=pair.left.image.clone();partialLeft(cv::Rect(300+5*52,240,40,40)).setTo(cv::Scalar(210,210,210));
+        const auto partial=DetectPair(partialLeft,pair.right.image,lr,rr,7,100);
+        Check(!partial.leftFound && partial.rightFound && partial.left.empty() && partial.right.size()==144 &&
+              partial.leftMarkers.ids.size()==35 && partial.leftMarkers.missing()==std::vector<int>{0} &&
+              partial.leftMarkers.attempts>1 && partial.rightMarkers.complete(),"Partial stereo detection bypassed full-board gate or lost per-camera diagnostics");
+        cv::Mat partialScreen(1000,1800,CV_8UC3,cv::Scalar(25,25,25));Viewport partialView;partialView.area={12,64,660,650};partialView.reset(partialLeft.size());
+        DrawView(partialScreen,partialLeft,partialView,lr,partial.left,partial.leftMarkers);
+        Check(cv::imwrite((root/"partial-review.png").string(),partialScreen),"Cannot render partial marker diagnostics");
         std::vector<cv::Point2f> missing{{1,2}};
         Check(!DetectRoi(pair.left.image,{0,0,100,100},missing) && missing.empty(),"Missing ROI reused old corners");
         Check(!DetectRoi(pair.left.image,{-5,0,100,100},missing),"Out-of-image ROI accepted");

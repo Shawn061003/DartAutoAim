@@ -15,17 +15,20 @@ const cv::Scalar kWhite(225,225,225),kGreen(75,225,90),kYellow(70,215,255);
 void Label(cv::Mat& canvas,const std::string& value,int x,int y,cv::Scalar color=kWhite,double size=.52) {
     calibration_ui::text(canvas,value,{x,y},std::max(14,static_cast<int>(std::lround(size*34))),color);
 }
-void DrawView(cv::Mat& canvas,const cv::Mat& raw,const Viewport& view,cv::Rect roi,const std::vector<cv::Point2f>& corners) {
+void DrawView(cv::Mat& canvas,const cv::Mat& raw,const Viewport& view,cv::Rect roi,const std::vector<cv::Point2f>& corners,const aprilgrid::DetectionInfo& info={}) {
     auto pane=canvas(view.area);pane.setTo(cv::Scalar(18,18,18));if(raw.empty()) return;
     const double s=view.scale();const cv::Mat affine=(cv::Mat_<double>(2,3)<<s,0,view.area.width/2.-s*view.center.x,0,s,view.area.height/2.-s*view.center.y);
     cv::warpAffine(raw,pane,affine,pane.size(),cv::INTER_LINEAR,cv::BORDER_CONSTANT,cv::Scalar(18,18,18));
     const cv::Point2d offset(view.area.x,view.area.y);
     if(!roi.empty()) cv::rectangle(pane,view.project(roi.tl())-offset,view.project(roi.br())-offset,kYellow,1,cv::LINE_AA);
-    if(!corners.empty()) {
-        std::vector<cv::Point2f> display;
-        for(const auto& p:corners) display.emplace_back(view.project(p)-offset);
-        aprilgrid::draw(pane,display);
-        for(const auto i:{std::size_t(0),corners.size()-1}) cv::putText(pane,std::to_string(i),display[i]+cv::Point2f(5,-5),cv::FONT_HERSHEY_SIMPLEX,.5,kYellow,1,cv::LINE_AA);
+    auto markers=info.ids.empty()?aprilgrid::fromPoints(corners):info;
+    for(auto& marker:markers.corners) for(auto& point:marker) point=view.project(point)-offset;
+    aprilgrid::draw(pane,markers);
+    if(info.attempts || !corners.empty()) {
+        const auto missing=markers.missing();
+        calibration_ui::text(pane,"缺失 ID："+aprilgrid::idText(missing,0,18),{10,22},16,kYellow);
+        if(missing.size()>18) calibration_ui::text(pane,aprilgrid::idText(missing,18),{10,44},16,kYellow);
+        if(!markers.duplicates.empty()) calibration_ui::text(pane,"重复 ID："+aprilgrid::idText(markers.duplicates),{10,66},16,kYellow);
     }
 }
 struct Button {cv::Rect box;std::string caption;int key;};
@@ -161,6 +164,8 @@ class Review {
             views_[0].reset(rawLeft_.size());views_[1].reset(rawRight_.size());
             detected_.left=r.sample.pair.left;detected_.right=r.sample.pair.right;detected_.reversed=r.sample.pair.rightReversed;
             detected_.leftFound=ValidCorners(detected_.left,rawLeft_.size());detected_.rightFound=ValidCorners(detected_.right,rawRight_.size());
+            if(detected_.leftFound) detected_.leftMarkers=aprilgrid::fromPoints(detected_.left);
+            if(detected_.rightFound) detected_.rightMarkers=aprilgrid::fromPoints(detected_.right);
             needDetection_=r.state!=Record::State::Accepted && (!r.leftRoi.empty() || !r.rightRoi.empty()) && (!detected_.leftFound || !detected_.rightFound);
             status_=r.state==Record::State::Accepted?"已纳入标定；重新框选后需再次接受此组图片":"分别框选两侧 ROI 并检查角点编号；空格接受，N 跳过";
         } catch(const std::exception& e) {rawLeft_.release();rawRight_.release();views_[0].reset({});views_[1].reset({});status_=e.what();}
@@ -298,14 +303,15 @@ public:
         Label(canvas,std::string("状态：")+(r.state==Record::State::Accepted?"已接受":r.state==Record::State::Skipped?"已跳过":"待处理"),360,28,kYellow);
         Label(canvas,"左相机 "+std::to_string(left_.referenceSize.width)+"x"+std::to_string(left_.referenceSize.height),15,52);
         Label(canvas,"右相机 "+std::to_string(right_.referenceSize.width)+"x"+std::to_string(right_.referenceSize.height),685,52);
-        DrawView(canvas,rawLeft_,views_[0],r.leftRoi,detected_.left);DrawView(canvas,rawRight_,views_[1],r.rightRoi,detected_.right);
+        DrawView(canvas,rawLeft_,views_[0],r.leftRoi,detected_.left,detected_.leftMarkers);DrawView(canvas,rawRight_,views_[1],r.rightRoi,detected_.right,detected_.rightMarkers);
         if(drag_>=0) {
             const auto box=views_[drag_].roi(start_,cursor_);const auto& v=views_[drag_];auto pane=canvas(v.area);const cv::Point2d offset(v.area.x,v.area.y);
             cv::rectangle(pane,v.project(box.tl())-offset,v.project(box.br())-offset,kGreen,2);
         }
         Label(canvas,status_.substr(0,145),15,770,kYellow);
-        Label(canvas,std::string("ROI 检测：")+(detection_.valid()?"处理中":"就绪")+"；上次 "+Number(detected_.milliseconds,0)+" ms；左/右："+
-            (detected_.leftFound?"已找到":"未找到")+" / "+(detected_.rightFound?"已找到":"未找到"),15,798);
+        Label(canvas,std::string("ROI 检测：")+(detection_.valid() || needDetection_?"处理中":"就绪")+"；上次 "+Number(detected_.milliseconds,0)+" ms；左 "+
+            std::to_string(detected_.leftMarkers.ids.size())+"/36（"+Number(detected_.leftMarkers.scale,2)+"x）；右 "+
+            std::to_string(detected_.rightMarkers.ids.size())+"/36（"+Number(detected_.rightMarkers.scale,2)+"x）",15,798);
         Label(canvas,"左键框选 ROI；滚轮缩放；右键单击放大、拖动平移；Shift+右键缩小；接受前核对ID 0 / 35及标记四角",15,825);
         for(const auto& b:Buttons()) {cv::rectangle(canvas,b.box,{65,65,65},cv::FILLED);Label(canvas,b.caption,b.box.x+8,b.box.y+26,kWhite,.47);}
         Label(canvas,"标注自动保存到 Input/annotations.yaml；BMP 原图和角点均保留原始坐标",15,972,kGreen,.5);

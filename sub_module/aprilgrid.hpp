@@ -3,6 +3,7 @@
 #include <opencv2/aruco.hpp>
 #include <opencv2/imgproc.hpp>
 #include <array>
+#include <algorithm>
 #include <cmath>
 #include <string>
 #include <vector>
@@ -31,48 +32,115 @@ inline std::vector<cv::Point3f> objectPoints() {
     return points;
 }
 
-// 保留现有完整板采样约定：36个ID均唯一可见时才返回144个对应角点。
-inline bool detect(const cv::Mat& image,std::vector<cv::Point2f>& points) {
+struct DetectionInfo {
+    std::vector<int> ids,duplicates;
+    std::vector<std::vector<cv::Point2f>> corners; // 与ids对应，始终使用原图坐标。
+    double scale=1.;
+    int attempts=0;
+    bool complete() const {return ids.size()==kTags && duplicates.empty();}
+    std::vector<int> missing() const {
+        std::vector<int> result;
+        for(int id=0;id<kTags;++id)
+            if(std::find(ids.begin(),ids.end(),id)==ids.end()) result.push_back(id);
+        return result;
+    }
+    void translate(cv::Point2f offset) {
+        for(auto& marker:corners) for(auto& point:marker) point+=offset;
+    }
+};
+
+inline std::string idText(const std::vector<int>& ids,std::size_t first=0,std::size_t count=kTags) {
+    if(ids.empty()) return "-";
+    std::string result;
+    for(std::size_t i=first;i<std::min(ids.size(),first+count);++i)
+        result+=(result.empty()?"":",")+std::to_string(ids[i]);
+    return result;
+}
+
+inline DetectionInfo fromPoints(const std::vector<cv::Point2f>& points) {
+    DetectionInfo result;
+    if(points.size()!=kPointCount) return result;
+    for(int id=0;id<kTags;++id) {
+        result.ids.push_back(id);
+        result.corners.emplace_back(points.begin()+4*id,points.begin()+4*id+4);
+    }
+    return result;
+}
+
+// 多尺度只提供检测初值；每次均回原生灰度图精修，不将插值像素作为标定观测。
+// 部分结果仅供显示，仍须36个ID唯一完整时才返回可标定的144个角点。
+inline bool detect(const cv::Mat& image,std::vector<cv::Point2f>& points,DetectionInfo* info=nullptr) {
     points.clear();
+    if(info) *info={};
     if(image.empty()) return false;
     cv::Mat gray;
     if(image.channels()==1) gray=image;
     else cv::cvtColor(image,gray,cv::COLOR_BGR2GRAY);
+    if(gray.cols<11 || gray.rows<11) return false; // 3像素精修窗口需要足够的原生图像边界。
     auto parameters=cv::aruco::DetectorParameters::create();
     parameters->markerBorderBits=kBorderBits;
     // 默认周长比例会剔除5472像素全幅中约40像素宽的远处标记。
     parameters->minMarkerPerimeterRate=.005;
-    parameters->cornerRefinementMethod=cv::aruco::CORNER_REFINE_SUBPIX;
-    parameters->cornerRefinementWinSize=3;
-    parameters->cornerRefinementMaxIterations=50;
-    parameters->cornerRefinementMinAccuracy=.001;
-    std::vector<std::vector<cv::Point2f>> corners;
-    std::vector<int> ids;
-    cv::aruco::detectMarkers(gray,dictionary(),corners,ids,parameters);
-    std::array<int,kTags> locations;
-    locations.fill(-1);
-    for(std::size_t i=0;i<ids.size();++i) {
-        const int id=ids[i];
-        if(id<0 || id>=kTags) continue;
-        if(locations[id]>=0) return false;
-        locations[id]=static_cast<int>(i);
+    parameters->cornerRefinementMethod=cv::aruco::CORNER_REFINE_NONE;
+    DetectionInfo best;
+    int attempts=0;
+    for(const double factor:{1.,1.5,2.,.75,.5}) {
+        // 限制插值图的内存；原图始终尝试，过大的放大倍率直接跳过。
+        if(factor>1. && (gray.total()*factor*factor>25000000. ||
+                         std::max(gray.cols,gray.rows)*factor>8192.)) continue;
+        if(std::min(gray.cols,gray.rows)*factor<8.) continue;
+        cv::Mat search;
+        if(factor==1.) search=gray;
+        else cv::resize(gray,search,{},factor,factor,factor<1.?cv::INTER_AREA:cv::INTER_LINEAR);
+        ++attempts;
+        std::vector<std::vector<cv::Point2f>> corners;
+        std::vector<int> ids;
+        cv::aruco::detectMarkers(search,dictionary(),corners,ids,parameters);
+        DetectionInfo current;current.scale=factor;
+        std::array<int,kTags> locations;locations.fill(-1);
+        for(std::size_t i=0;i<ids.size();++i) {
+            const int id=ids[i];
+            if(id<0 || id>=kTags) continue;
+            if(locations[id]>=0) current.duplicates.push_back(id);
+            else locations[id]=static_cast<int>(i);
+        }
+        const double sx=static_cast<double>(search.cols)/gray.cols;
+        const double sy=static_cast<double>(search.rows)/gray.rows;
+        for(int id=0;id<kTags;++id) if(locations[id]>=0) {
+            auto marker=corners[locations[id]];
+            for(auto& point:marker) {
+                // resize使用像素中心映射，X/Y分别用实际尺寸比例，兼容奇数ROI。
+                point.x=static_cast<float>((point.x+.5)/sx-.5);
+                point.y=static_cast<float>((point.y+.5)/sy-.5);
+            }
+            if(!std::all_of(marker.begin(),marker.end(),[&](const cv::Point2f& p) {
+                return std::isfinite(p.x) && std::isfinite(p.y) && p.x>=0 && p.y>=0 && p.x<gray.cols && p.y<gray.rows;
+            })) continue;
+            cv::cornerSubPix(gray,marker,{3,3},{-1,-1},
+                {cv::TermCriteria::COUNT|cv::TermCriteria::EPS,50,.001});
+            const bool valid=std::all_of(marker.begin(),marker.end(),[&](const cv::Point2f& p) {
+                return std::isfinite(p.x) && std::isfinite(p.y) && p.x>=0 && p.y>=0 && p.x<gray.cols && p.y<gray.rows;
+            });
+            if(valid) {current.ids.push_back(id);current.corners.push_back(std::move(marker));}
+        }
+        if(current.ids.size()>best.ids.size() ||
+           (current.ids.size()==best.ids.size() && current.duplicates.size()<best.duplicates.size())) best=std::move(current);
+        if(best.complete()) break;
     }
-    for(int id=0;id<kTags;++id) if(locations[id]<0) return false;
+    best.attempts=attempts;
+    if(info) *info=best;
+    if(!best.complete()) return false;
     points.reserve(kPointCount);
-    for(int id=0;id<kTags;++id)
-        points.insert(points.end(),corners[locations[id]].begin(),corners[locations[id]].end());
+    for(const auto& marker:best.corners) points.insert(points.end(),marker.begin(),marker.end());
     return true;
 }
 
+inline void draw(cv::Mat& image,const DetectionInfo& info) {
+    if(!info.ids.empty()) cv::aruco::drawDetectedMarkers(image,info.corners,info.ids);
+}
+
 inline void draw(cv::Mat& image,const std::vector<cv::Point2f>& points) {
-    if(points.size()!=kPointCount) return;
-    std::vector<std::vector<cv::Point2f>> corners;
-    std::vector<int> ids;
-    for(int id=0;id<kTags;++id) {
-        corners.emplace_back(points.begin()+4*id,points.begin()+4*id+4);
-        ids.push_back(id);
-    }
-    cv::aruco::drawDetectedMarkers(image,corners,ids);
+    draw(image,fromPoints(points));
 }
 
 inline void writeSpecification(cv::FileStorage& file) {

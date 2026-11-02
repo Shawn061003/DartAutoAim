@@ -274,22 +274,27 @@ struct Viewport {
                         cv::Point(static_cast<int>(std::ceil(std::max(a.x,b.x))),static_cast<int>(std::ceil(std::max(a.y,b.y)))))&cv::Rect({},native);
     }
 };
-inline bool DetectRoi(const cv::Mat& raw,cv::Rect roi,std::vector<cv::Point2f>& points) {
-    points.clear();if(raw.empty() || roi.width<24 || roi.height<24 || (roi&cv::Rect({},raw.size()))!=roi) return false;
-    // 只检测框选的原生ROI，按ID返回144个角点，再恢复全图坐标。
-    if(!aprilgrid::detect(raw(roi),points)) return false;
-    for(auto& p:points) p+=cv::Point2f(static_cast<float>(roi.x),static_cast<float>(roi.y));
+inline bool DetectRoi(const cv::Mat& raw,cv::Rect roi,std::vector<cv::Point2f>& points,aprilgrid::DetectionInfo* info=nullptr) {
+    points.clear();if(info) *info={};
+    if(raw.empty() || roi.width<24 || roi.height<24 || (roi&cv::Rect({},raw.size()))!=roi) return false;
+    // ROI内多尺度检测，在原生ROI精修后恢复全图坐标；部分标记只供界面提示。
+    const bool found=aprilgrid::detect(raw(roi),points,info);
+    const cv::Point2f offset(static_cast<float>(roi.x),static_cast<float>(roi.y));
+    if(info) info->translate(offset);
+    if(!found) return false;
+    for(auto& p:points) p+=offset;
     if(!ValidCorners(points,raw.size())) {points.clear();return false;}return true;
 }
 struct Detection {
     std::size_t index=0;std::uint64_t epoch=0;
     std::vector<cv::Point2f> left,right;
+    aprilgrid::DetectionInfo leftMarkers,rightMarkers;
     bool leftFound=false,rightFound=false,reversed=false;
     double milliseconds=0;
 };
 inline Detection DetectPair(cv::Mat left,cv::Mat right,cv::Rect lr,cv::Rect rr,std::size_t index,std::uint64_t epoch) {
     const auto started=Clock::now();Detection result;result.index=index;result.epoch=epoch;
-    result.leftFound=DetectRoi(left,lr,result.left);result.rightFound=DetectRoi(right,rr,result.right);
+    result.leftFound=DetectRoi(left,lr,result.left,&result.leftMarkers);result.rightFound=DetectRoi(right,rr,result.right,&result.rightMarkers);
     if(result.leftFound && result.rightFound) result.reversed=AlignRight(result.left,result.right);
     result.milliseconds=std::chrono::duration<double,std::milli>(Clock::now()-started).count();return result;
 }
