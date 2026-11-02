@@ -93,10 +93,54 @@ int main() {
         const cv::Point cellPoint(10+static_cast<int>(first.x*10/size.width)*40+20,675+static_cast<int>(first.y*10/size.height)*20+10);
         check(covered.at<cv::Vec3b>(cellPoint)==cv::Vec3b(55,140,55),"Included corners missing from bottom-left coverage grid");
         check(cv::imwrite((root/"review.png").string(),covered),"Cannot render Chinese review window");
+        // All four handles retain their ID/corner order through a zoomed native-coordinate edit.
+        const auto beforeEdit=app.dataset().records[0].sample.points;const auto beforeRoi=app.dataset().records[0].roi;
+        app.key('e');
+        for(int corner=0;corner<4;++corner) {
+            const cv::Point hit=app.viewport().project(beforeEdit[corner]),drop=hit+cv::Point(3,2);
+            const cv::Point2f nativeDrop=beforeEdit[corner]+cv::Point2f(3./app.viewport().scale(),2./app.viewport().scale());
+            app.mouse(cv::EVENT_LBUTTONDOWN,hit.x,hit.y,0);app.mouse(cv::EVENT_MOUSEMOVE,drop.x,drop.y,cv::EVENT_FLAG_LBUTTON);
+            check(app.dataset().records[0].sample.points==beforeEdit,"Drag preview changed committed calibration data");
+            app.mouse(cv::EVENT_LBUTTONUP,drop.x,drop.y,0);
+            const auto& edited=app.dataset().records[0];
+            check(edited.state==MonoRecord::State::Pending && selected(app.dataset().records).empty() && edited.roi==beforeRoi && !app.detectorBusy(),
+                  "Corner edit triggered ROI detection or retained acceptance");
+            for(std::size_t i=0;i<beforeEdit.size();++i)
+                check(cv::norm(edited.sample.points[i]-(i==static_cast<std::size_t>(corner)?nativeDrop:beforeEdit[i]))<1e-4,
+                      "Corner drag changed another ID/corner or lost native coordinates");
+            auto saved=readDataset(o);loadAnnotations(o,saved);
+            check(cv::norm(saved.records[0].sample.points[corner]-nativeDrop)<1e-4,"Manual corner was not persisted");
+            app.key('z');check(app.dataset().records[0].sample.points==beforeEdit,"Corner undo did not restore the last gesture");
+        }
+        const cv::Point hit=app.viewport().project(beforeEdit[0]),bad=app.viewport().project(beforeEdit[2]+cv::Point2f(4,4));
+        app.mouse(cv::EVENT_LBUTTONDOWN,hit.x+2,hit.y+1,0);app.mouse(cv::EVENT_LBUTTONUP,hit.x+2,hit.y+1,0);
+        check(app.dataset().records[0].sample.points==beforeEdit,"Clicking a handle without dragging moved the corner");
+        app.mouse(cv::EVENT_LBUTTONDOWN,hit.x,hit.y,0);app.mouse(cv::EVENT_LBUTTONUP,bad.x,bad.y,0);
+        check(app.dataset().records[0].sample.points==beforeEdit,"Crossed/flipped marker edit was accepted");
+        app.mouse(cv::EVENT_LBUTTONDOWN,hit.x,hit.y,0);app.mouse(cv::EVENT_MOUSEMOVE,hit.x+3,hit.y+2,cv::EVENT_FLAG_LBUTTON);app.key(27);
+        check(!app.quitting() && app.dataset().records[0].sample.points==beforeEdit,"Escape did not cancel a drag safely");
+        check(cv::imwrite((root/"corner-editor.png").string(),app.render()),"Cannot render manual corner handles");
+        app.mouse(cv::EVENT_LBUTTONDOWN,hit.x,hit.y,0);app.mouse(cv::EVENT_LBUTTONUP,hit.x+2,hit.y+1,0);
+        const auto committed=app.dataset().records[0].sample.points;
+        app.key(' ');app.key('b');check(selected(app.dataset().records)[0].points==committed,"Reaccepting ignored manual corners");
         app.key('d');check(selected(app.dataset().records).empty() && app.render().at<cv::Vec3b>(cellPoint)==cv::Vec3b(40,40,40),"Removed image remained in coverage");
         app.key(' ');auto resumed=readDataset(o);loadAnnotations(o,resumed);
         check(resumed.records[0].state==MonoRecord::State::Accepted && cv::norm(resumed.records[0].roi.tl()-roi.tl())<=3 && cv::norm(resumed.records[0].roi.br()-roi.br())<=3,"Annotations did not resume");
         app.finish();
+        // Partial edits survive a reload but cannot become calibration observations.
+        Options partial=o;partial.input=root/"Partial";partial.output=root/"PartialResult";fs::create_directories(partial.input);
+        check(cv::imwrite((partial.input/"000001.bmp").string(),incomplete),"Cannot write partial edit fixture");
+        MonoReview partialApp(partial);partialApp.setRoi(roi);waitDetector(partialApp);partialApp.key('e');
+        const cv::Point partialHit=partialApp.viewport().project(expected[20]),partialDrop=partialHit+cv::Point(2,2);
+        partialApp.mouse(cv::EVENT_LBUTTONDOWN,partialHit.x,partialHit.y,0);partialApp.mouse(cv::EVENT_LBUTTONUP,partialDrop.x,partialDrop.y,0);
+        const auto& partialRecord=partialApp.dataset().records[0];
+        check(partialRecord.manualMarkers.ids.size()==35 && partialRecord.manualMarkers.missing()==std::vector<int>{0} && partialRecord.sample.points.empty(),
+              "Partial edit lost marker IDs or created full observations");
+        const auto manual=partialRecord.manualMarkers;partialApp.key(' ');
+        check(selected(partialApp.dataset().records).empty(),"Partial manual edit bypassed complete-board gate");partialApp.finish();
+        partial.output=root/"PartialReload";MonoReview partialReload(partial);partialReload.update();
+        check(!partialReload.detectorBusy() && partialReload.dataset().records[0].manualMarkers.corners==manual.corners,
+              "Reload discarded or redetected manual partial corners");partialReload.finish();
         auto changed=readDataset(o);fs::last_write_time(changed.records[0].path,fs::last_write_time(changed.records[0].path)+std::chrono::seconds(2));loadAnnotations(o,changed);
         check(changed.records[0].state==MonoRecord::State::Pending,"Changed image reused stale annotation");
         // End-to-end offline solve/export using nine known, independent board poses.

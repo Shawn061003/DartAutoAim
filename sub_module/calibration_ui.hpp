@@ -1,4 +1,5 @@
 #pragma once
+#include "aprilgrid.hpp"
 #include <opencv2/core.hpp>
 #include <opencv2/imgproc.hpp>
 #include <opencv2/highgui.hpp>
@@ -10,6 +11,60 @@
 #include <stdexcept>
 
 namespace calibration_ui {
+// 拖动时仅更新显示；松开并通过四边形检查后，由调用方提交原生坐标。
+class CornerEditor {
+    int marker_=-1,corner_=-1,side_=0,undoSide_=-1;
+    bool dragging_=false;
+    cv::Point2d grabOffset_;
+    aprilgrid::DetectionInfo before_,undo_;
+public:
+    bool enabled=false;
+    bool dragging() const {return dragging_;}
+    int side() const {return side_;}
+    int undoSide() const {return undoSide_;}
+    void reset() {*this=CornerEditor{};}
+    template<class View> bool begin(const aprilgrid::DetectionInfo& info,const View& view,cv::Point2d screen,int side=0) {
+        double nearest=10.;int marker=-1,corner=-1;
+        for(std::size_t i=0;i<info.corners.size();++i) for(int j=0;j<4;++j) {
+            const double distance=cv::norm(view.project(info.corners[i][j])-screen);
+            if(distance<nearest) {nearest=distance;marker=static_cast<int>(i);corner=j;}
+        }
+        if(marker<0) return false;
+        marker_=marker;corner_=corner;side_=side;before_=info;
+        grabOffset_=cv::Point2d(info.corners[marker][corner])-view.unproject(screen);
+        dragging_=true;return true;
+    }
+    template<class View> void move(aprilgrid::DetectionInfo& info,const View& view,cv::Point2d screen) {
+        if(!dragging_) return;
+        auto point=view.unproject(screen)+grabOffset_;
+        info.corners[marker_][corner_]={static_cast<float>(std::clamp(point.x,0.,double(view.native.width-1))),
+                                      static_cast<float>(std::clamp(point.y,0.,double(view.native.height-1)))};
+    }
+    void cancel(aprilgrid::DetectionInfo& info) {if(dragging_) info=before_;dragging_=false;}
+    bool finish(aprilgrid::DetectionInfo& info) {
+        if(!dragging_) return false;
+        dragging_=false;
+        const auto& marker=info.corners[marker_];const auto& original=before_.corners[marker_];
+        if(!cv::isContourConvex(marker) || std::abs(cv::contourArea(marker))<1. ||
+           cv::contourArea(marker,true)*cv::contourArea(original,true)<=0.) {info=before_;return false;}
+        if(cv::norm(marker[corner_]-original[corner_])<1e-5) return false;
+        undo_=before_;undoSide_=side_;return true;
+    }
+    bool undo(aprilgrid::DetectionInfo& info) {
+        if(undoSide_<0) return false;
+        info=std::move(undo_);undoSide_=-1;marker_=corner_=-1;return true;
+    }
+    void draw(cv::Mat& pane,const aprilgrid::DetectionInfo& display,int side=0) const {
+        if(!enabled) return;
+        for(std::size_t i=0;i<display.corners.size();++i) for(int j=0;j<4;++j) {
+            const auto point=display.corners[i][j];
+            const bool active=side==side_ && static_cast<int>(i)==marker_ && j==corner_;
+            cv::circle(pane,point,active?6:3,active?cv::Scalar(0,165,255):cv::Scalar(0,255,255),1,cv::LINE_AA);
+            if(active) {cv::line(pane,point-cv::Point2f(9,0),point+cv::Point2f(9,0),{0,165,255},1,cv::LINE_AA);
+                         cv::line(pane,point-cv::Point2f(0,9),point+cv::Point2f(0,9),{0,165,255},1,cv::LINE_AA);}
+        }
+    }
+};
 inline bool gtkBackend() {
     if(const auto* backend=std::getenv("OPENCV_UI_BACKEND")) {
         const std::string name=backend;if(name.rfind("GTK",0)==0) return true;

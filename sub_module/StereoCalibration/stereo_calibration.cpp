@@ -15,7 +15,7 @@ const cv::Scalar kWhite(225,225,225),kGreen(75,225,90),kYellow(70,215,255);
 void Label(cv::Mat& canvas,const std::string& value,int x,int y,cv::Scalar color=kWhite,double size=.52) {
     calibration_ui::text(canvas,value,{x,y},std::max(14,static_cast<int>(std::lround(size*34))),color);
 }
-void DrawView(cv::Mat& canvas,const cv::Mat& raw,const Viewport& view,cv::Rect roi,const std::vector<cv::Point2f>& corners,const aprilgrid::DetectionInfo& info={}) {
+void DrawView(cv::Mat& canvas,const cv::Mat& raw,const Viewport& view,cv::Rect roi,const std::vector<cv::Point2f>& corners,const aprilgrid::DetectionInfo& info={},const calibration_ui::CornerEditor* editor=nullptr,int side=0) {
     auto pane=canvas(view.area);pane.setTo(cv::Scalar(18,18,18));if(raw.empty()) return;
     const double s=view.scale();const cv::Mat affine=(cv::Mat_<double>(2,3)<<s,0,view.area.width/2.-s*view.center.x,0,s,view.area.height/2.-s*view.center.y);
     cv::warpAffine(raw,pane,affine,pane.size(),cv::INTER_LINEAR,cv::BORDER_CONSTANT,cv::Scalar(18,18,18));
@@ -24,7 +24,8 @@ void DrawView(cv::Mat& canvas,const cv::Mat& raw,const Viewport& view,cv::Rect r
     auto markers=info.ids.empty()?aprilgrid::fromPoints(corners):info;
     for(auto& marker:markers.corners) for(auto& point:marker) point=view.project(point)-offset;
     aprilgrid::draw(pane,markers);
-    if(info.attempts || !corners.empty()) {
+    if(editor) editor->draw(pane,markers,side);
+    if(info.attempts || !markers.ids.empty()) {
         const auto missing=markers.missing();
         calibration_ui::text(pane,"缺失 ID："+aprilgrid::idText(missing,0,18),{10,22},16,kYellow);
         if(missing.size()>18) calibration_ui::text(pane,aprilgrid::idText(missing,18),{10,44},16,kYellow);
@@ -38,6 +39,7 @@ const std::vector<Button>& Buttons() {
         {{385,835,145,42},"上一组 [B]",'b'},{{540,835,145,42},"下一组 [P]",'p'},
         {{695,835,180,42},"撤销接受 [U]",'u'},{{885,835,180,42},"保存结果 [S]",'s'},
         {{15,895,210,42},"清除两侧 ROI [R]",'r'},{{235,895,210,42},"移出标定 [D]",'d'},
+        {{455,895,220,42},"开关角点精修 [E]",'e'},
         {{685,895,190,42},"重置缩放 [0]",'0'},
         {{885,895,180,42},"退出 [Q]",'q'},
         {{15,716,85,28},"左 + [1]",'1'},{{110,716,85,28},"左 - [2]",'2'},
@@ -137,15 +139,29 @@ class Review {
     std::vector<std::size_t> undo_;
     int listOffset_=0,drag_=-1,pan_=-1;cv::Point2d start_,cursor_,lastPan_,rightStart_;
     bool rightMoved_=false;int activeSide_=0;calibration_ui::PointerInput pointer_;
+    calibration_ui::CornerEditor editor_;
     std::string status_="分别框选左右图片中的完整标定板，并保留白色边缘";
     int count(Record::State state) const {return static_cast<int>(std::count_if(dataset_.records.begin(),dataset_.records.end(),[&](const Record& r){return r.state==state;}));}
     Record& current(){return dataset_.records[index_];}
     const Record& current() const {return dataset_.records[index_];}
     void persist(){SaveAnnotations(settings_.input/"annotations.yaml",dataset_.records);}
     void changed() {++revision_;solved_={};needFit_=true;persist();}
+    aprilgrid::DetectionInfo& markers(int side) {return side==0?detected_.leftMarkers:detected_.rightMarkers;}
+    void commitCorners() {
+        auto& r=current();const bool included=r.state==Record::State::Accepted;
+        detected_.left=aprilgrid::fullPoints(detected_.leftMarkers);detected_.right=aprilgrid::fullPoints(detected_.rightMarkers);
+        detected_.leftFound=ValidCorners(detected_.left,left_.referenceSize);detected_.rightFound=ValidCorners(detected_.right,right_.referenceSize);
+        detected_.reversed=false;r.sample.pair.left=detected_.left;r.sample.pair.right=detected_.right;r.sample.pair.rightReversed=false;
+        r.leftManualMarkers=detected_.leftFound?aprilgrid::DetectionInfo{}:detected_.leftMarkers;
+        r.rightManualMarkers=detected_.rightFound?aprilgrid::DetectionInfo{}:detected_.rightMarkers;
+        r.state=Record::State::Pending;++epoch_;
+        if(included) changed();else persist();
+        status_="角点已保存；核对两侧后按空格重新接受。Z 撤销上次调整，E 退出精修";
+    }
     void invalidateCurrent() {
         auto& r=current();const bool included=r.state==Record::State::Accepted;
         r.state=Record::State::Pending;r.sample.pair.left.clear();r.sample.pair.right.clear();
+        r.leftManualMarkers={};r.rightManualMarkers={};editor_.reset();
         if(included) changed();
         detected_={};++epoch_;needDetection_=!rawLeft_.empty() && !rawRight_.empty();persist();
     }
@@ -154,7 +170,7 @@ class Review {
         o.captureMode="offline_manual_roi_native_full_frames";o.minPairs=settings_.minPairs;o.maxPairs=settings_.maxPairs;o.holdSeconds=0;o.pairMs=dataset_.pairMs;return o;
     }
     void load(std::size_t index) {
-        index_=std::min(index,dataset_.records.size()-1);++epoch_;needDetection_=false;drag_=pan_=-1;detected_={};
+        index_=std::min(index,dataset_.records.size()-1);++epoch_;needDetection_=false;drag_=pan_=-1;detected_={};editor_.reset();
         rawLeft_.release();rawRight_.release();
         try {
             const auto& r=current();rawLeft_=cv::imread(r.sample.pair.leftPath.string(),cv::IMREAD_COLOR|cv::IMREAD_IGNORE_ORIENTATION);
@@ -165,8 +181,12 @@ class Review {
             detected_.left=r.sample.pair.left;detected_.right=r.sample.pair.right;detected_.reversed=r.sample.pair.rightReversed;
             detected_.leftFound=ValidCorners(detected_.left,rawLeft_.size());detected_.rightFound=ValidCorners(detected_.right,rawRight_.size());
             if(detected_.leftFound) detected_.leftMarkers=aprilgrid::fromPoints(detected_.left);
+            else detected_.leftMarkers=r.leftManualMarkers;
             if(detected_.rightFound) detected_.rightMarkers=aprilgrid::fromPoints(detected_.right);
-            needDetection_=r.state!=Record::State::Accepted && (!r.leftRoi.empty() || !r.rightRoi.empty()) && (!detected_.leftFound || !detected_.rightFound);
+            else detected_.rightMarkers=r.rightManualMarkers;
+            needDetection_=r.state!=Record::State::Accepted &&
+                ((!r.leftRoi.empty() && !detected_.leftFound && detected_.leftMarkers.ids.empty()) ||
+                 (!r.rightRoi.empty() && !detected_.rightFound && detected_.rightMarkers.ids.empty()));
             status_=r.state==Record::State::Accepted?"已纳入标定；重新框选后需再次接受此组图片":"分别框选两侧 ROI 并检查角点编号；空格接受，N 跳过";
         } catch(const std::exception& e) {rawLeft_.release();rawRight_.release();views_[0].reset({});views_[1].reset({});status_=e.what();}
     }
@@ -233,7 +253,13 @@ public:
         }
     }
     void key(int key) {
+        if(editor_.dragging()) {editor_.cancel(markers(editor_.side()));if(key==27) {status_="已取消当前角点拖动";return;}}
         auto& r=current();
+        if(key=='e' || key=='E') {editor_.enabled=!editor_.enabled;drag_=pan_=-1;status_=editor_.enabled?"精修模式：拖动黄色角点；滚轮放大，右键平移；Z 撤销，E 返回框选":"框选模式：左键选择 ROI，E 开启角点精修";return;}
+        if((key=='z' || key=='Z') && editor_.enabled) {
+            const int side=editor_.undoSide();
+            if(side>=0 && editor_.undo(markers(side))) commitCorners();else status_="当前图片组没有可撤销的角点调整";return;
+        }
         if(key==27 || key=='q') {quit_=true;return;}
         if(key=='b') {if(index_>0) load(index_-1);return;}
         if(key=='p') {advance();return;}
@@ -264,6 +290,15 @@ public:
         const auto point=pointer_.point(event,x,y);const cv::Point pixel(cvRound(point.x),cvRound(point.y));
         int side=-1;for(int i=0;i<2;++i) if(views_[i].area.contains(pixel) && !views_[i].native.empty()) side=i;
         if(side>=0) activeSide_=side;
+        if(editor_.dragging()) {
+            const int chosen=editor_.side();
+            if(event==cv::EVENT_MOUSEMOVE) editor_.move(markers(chosen),views_[chosen],point);
+            if(event==cv::EVENT_LBUTTONUP) {
+                editor_.move(markers(chosen),views_[chosen],point);
+                if(editor_.finish(markers(chosen))) commitCorners();else status_="调整未提交：位置未变化，或四边形发生交叉、翻转或退化";
+            }
+            return;
+        }
         if(calibration_ui::PointerInput::isWheel(event)) {
             const int direction=pointer_.direction(flags);if(direction==0) return;
             if(side>=0) views_[side].magnify(point,direction>0?1.3:1./1.3);
@@ -275,6 +310,11 @@ public:
             if(x>=1360 && y>=438 && y<924) {
                 const int row=(y-438)/27+std::min(listOffset_,std::max(0,count(Record::State::Accepted)-18));int n=0;
                 for(std::size_t i=0;i<dataset_.records.size();++i) if(dataset_.records[i].state==Record::State::Accepted) {if(n++==row) {load(i);return;}}
+            }
+            if(side>=0 && editor_.enabled) {
+                if(detection_.valid() || needDetection_) status_="等待两侧 ROI 检测结束后再调整角点";
+                else if(!editor_.begin(markers(side),views_[side],point,side)) status_="请放大图片，点击黄色角点并拖动；E 返回 ROI 框选";
+                return;
             }
             if(side>=0) {const auto p=views_[side].unproject(point);if(p.x>=0 && p.y>=0 && p.x<views_[side].native.width && p.y<views_[side].native.height) {drag_=side;start_=cursor_=point;}}
         }
@@ -303,7 +343,7 @@ public:
         Label(canvas,std::string("状态：")+(r.state==Record::State::Accepted?"已接受":r.state==Record::State::Skipped?"已跳过":"待处理"),360,28,kYellow);
         Label(canvas,"左相机 "+std::to_string(left_.referenceSize.width)+"x"+std::to_string(left_.referenceSize.height),15,52);
         Label(canvas,"右相机 "+std::to_string(right_.referenceSize.width)+"x"+std::to_string(right_.referenceSize.height),685,52);
-        DrawView(canvas,rawLeft_,views_[0],r.leftRoi,detected_.left,detected_.leftMarkers);DrawView(canvas,rawRight_,views_[1],r.rightRoi,detected_.right,detected_.rightMarkers);
+        DrawView(canvas,rawLeft_,views_[0],r.leftRoi,detected_.left,detected_.leftMarkers,&editor_,0);DrawView(canvas,rawRight_,views_[1],r.rightRoi,detected_.right,detected_.rightMarkers,&editor_,1);
         if(drag_>=0) {
             const auto box=views_[drag_].roi(start_,cursor_);const auto& v=views_[drag_];auto pane=canvas(v.area);const cv::Point2d offset(v.area.x,v.area.y);
             cv::rectangle(pane,v.project(box.tl())-offset,v.project(box.br())-offset,kGreen,2);
@@ -312,8 +352,8 @@ public:
         Label(canvas,std::string("ROI 检测：")+(detection_.valid() || needDetection_?"处理中":"就绪")+"；上次 "+Number(detected_.milliseconds,0)+" ms；左 "+
             std::to_string(detected_.leftMarkers.ids.size())+"/36（"+Number(detected_.leftMarkers.scale,2)+"x）；右 "+
             std::to_string(detected_.rightMarkers.ids.size())+"/36（"+Number(detected_.rightMarkers.scale,2)+"x）",15,798);
-        Label(canvas,"左键框选 ROI；滚轮缩放；右键单击放大、拖动平移；Shift+右键缩小；接受前核对ID 0 / 35及标记四角",15,825);
-        for(const auto& b:Buttons()) {cv::rectangle(canvas,b.box,{65,65,65},cv::FILLED);Label(canvas,b.caption,b.box.x+8,b.box.y+26,kWhite,.47);}
+        Label(canvas,editor_.enabled?"精修中：左键拖动角点；滚轮放大、右键平移；Z 撤销上次调整；E 退出；ESC 取消正在进行的拖动":"左键框选 ROI；E 开启角点精修；滚轮缩放；右键单击放大、拖动平移；接受前核对标记四角",15,825);
+        for(const auto& b:Buttons()) {cv::rectangle(canvas,b.box,b.key=='e' && editor_.enabled?cv::Scalar(55,120,55):cv::Scalar(65,65,65),cv::FILLED);Label(canvas,b.caption,b.box.x+8,b.box.y+26,kWhite,.47);}
         Label(canvas,"标注自动保存到 Input/annotations.yaml；BMP 原图和角点均保留原始坐标",15,972,kGreen,.5);
         cv::line(canvas,{1355,0},{1355,999},{75,75,75});const int x=1370;
         Label(canvas,"当前标定数据",x,30,kGreen,.6);
@@ -345,6 +385,7 @@ public:
         Label(canvas,"点击列表检查图片；滚轮或按钮翻动列表",x,978,kWhite,.44);return canvas;
     }
     int finish() {
+        if(editor_.dragging()) editor_.cancel(markers(editor_.side()));
         persist();if(detection_.valid()) {try{detection_.get();}catch(const std::exception& e){std::cerr<<e.what()<<'\n';}}
         for(;;) {if(fitting_.valid()) finishFit();startFit();if(!fitting_.valid()) break;}
         if(saving_.valid()) savedRevision_=saving_.get();

@@ -67,6 +67,41 @@ inline DetectionInfo fromPoints(const std::vector<cv::Point2f>& points) {
     return result;
 }
 
+inline std::vector<cv::Point2f> fullPoints(const DetectionInfo& info) {
+    std::vector<cv::Point2f> points;
+    if(!info.complete() || info.corners.size()!=kTags) return points;
+    for(int id=0;id<kTags;++id) {
+        if(info.ids[id]!=id || info.corners[id].size()!=4) return {};
+        points.insert(points.end(),info.corners[id].begin(),info.corners[id].end());
+    }
+    return points;
+}
+
+// 完整观测沿用原有points字段；只额外保存手动修过的部分标记，兼容旧标注。
+inline void writeManualMarkers(cv::FileStorage& file,const std::string& key,const DetectionInfo& info) {
+    if(info.ids.empty()) return;
+    file<<key<<"{"<<"ids"<<info.ids<<"duplicates"<<info.duplicates<<"corners"<<"[";
+    for(const auto& marker:info.corners) file<<marker;
+    file<<"]"<<"}";
+}
+inline DetectionInfo readManualMarkers(const cv::FileNode& node,cv::Size size) {
+    DetectionInfo info;
+    if(node.empty()) return info;
+    node["ids"]>>info.ids;
+    if(!node["duplicates"].empty()) node["duplicates"]>>info.duplicates;
+    for(int id:info.duplicates) if(id<0 || id>=kTags) return {};
+    for(const auto& item:node["corners"]) {std::vector<cv::Point2f> marker;item>>marker;info.corners.push_back(std::move(marker));}
+    if(info.ids.size()!=info.corners.size() || info.ids.size()>kTags) return {};
+    int previous=-1;
+    for(std::size_t i=0;i<info.ids.size();++i) {
+        if(info.ids[i]<=previous || info.ids[i]>=kTags || info.corners[i].size()!=4) return {};
+        previous=info.ids[i];
+        for(const auto& point:info.corners[i])
+            if(!std::isfinite(point.x) || !std::isfinite(point.y) || point.x<0 || point.y<0 || point.x>=size.width || point.y>=size.height) return {};
+    }
+    return info;
+}
+
 // 多尺度只提供检测初值；每次均回原生灰度图精修，不将插值像素作为标定观测。
 // 部分结果仅供显示，仍须36个ID唯一完整时才返回可标定的144个角点。
 inline bool detect(const cv::Mat& image,std::vector<cv::Point2f>& points,DetectionInfo* info=nullptr) {

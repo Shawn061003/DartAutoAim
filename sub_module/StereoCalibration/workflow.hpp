@@ -97,6 +97,7 @@ struct Record {
     LivePair sample;
     cv::Rect leftRoi,rightRoi;
     State state=State::Pending;
+    aprilgrid::DetectionInfo leftManualMarkers,rightManualMarkers;
 };
 inline std::map<std::string,fs::path> IndexSide(const fs::path& path,bool left) {
     Require(fs::is_directory(path),"Missing input directory: "+path.string());
@@ -214,7 +215,9 @@ inline void SaveAnnotations(const fs::path& path,const std::vector<Record>& reco
         f<<"{"<<"id"<<r.key<<"state"<<static_cast<int>(r.state)<<"left_file"<<r.sample.pair.leftPath.filename().string()
          <<"right_file"<<r.sample.pair.rightPath.filename().string()<<"left_stamp"<<FileStamp(r.sample.pair.leftPath)<<"right_stamp"<<FileStamp(r.sample.pair.rightPath)
          <<"left_roi"<<r.leftRoi<<"right_roi"<<r.rightRoi<<"left_points"<<r.sample.pair.left<<"right_points"<<r.sample.pair.right
-         <<"right_reversed"<<static_cast<int>(r.sample.pair.rightReversed)<<"}";
+         <<"right_reversed"<<static_cast<int>(r.sample.pair.rightReversed);
+        aprilgrid::writeManualMarkers(f,"left_manual_markers",r.leftManualMarkers);
+        aprilgrid::writeManualMarkers(f,"right_manual_markers",r.rightManualMarkers);f<<"}";
     }
     f<<"]";f.release();fs::rename(pending,path);
 }
@@ -244,6 +247,8 @@ inline void LoadAnnotations(const fs::path& path,std::vector<Record>& records,cv
         if(state<0 || state>2 || (state==static_cast<int>(Record::State::Accepted) && (!ValidCorners(lp,left) || !ValidCorners(rp,right)))) continue;
         r.leftRoi=lr;r.rightRoi=rr;r.sample.pair.left=std::move(lp);r.sample.pair.right=std::move(rp);
         r.sample.pair.rightReversed=static_cast<int>(n["right_reversed"])!=0;r.state=static_cast<Record::State>(state);
+        if(r.sample.pair.left.empty()) r.leftManualMarkers=aprilgrid::readManualMarkers(n["left_manual_markers"],left);
+        if(r.sample.pair.right.empty()) r.rightManualMarkers=aprilgrid::readManualMarkers(n["right_manual_markers"],right);
     }
 }
 inline std::vector<LivePair> Selected(const std::vector<Record>& records) {

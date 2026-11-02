@@ -88,6 +88,22 @@ int main() {
         const auto source=root/"capture/left/000001.bmp";const auto stamp=fs::last_write_time(source);fs::last_write_time(source,stamp+std::chrono::seconds(1));
         auto replaced=ReadDataset(root/"capture");LoadAnnotations(annotations,replaced.records,pair.left.image.size(),pair.right.image.size());
         Check(Selected(replaced.records).empty(),"Modified source image reused stale accepted corners");fs::last_write_time(source,stamp);
+        // A partially detected pane can be corrected and resumed without fabricating missing IDs.
+        auto partialRecords=loaded.records;partialRecords[0].state=Record::State::Pending;
+        partialRecords[0].sample.pair.left.clear();partialRecords[0].leftManualMarkers=partial.leftMarkers;
+        SaveAnnotations(annotations,partialRecords);
+        Settings partialSettings;partialSettings.input=root/"capture";partialSettings.output=root/"PartialResult";
+        Camera partialCameraLeft,partialCameraRight;partialCameraLeft.referenceSize=pair.left.image.size();partialCameraRight.referenceSize=pair.right.image.size();
+        Review partialReview(partialSettings,partialCameraLeft,partialCameraRight);partialReview.key('e');
+        const cv::Point partialHit=partialReview.viewport(0).project(expectedLeft[20]),partialDrop=partialHit+cv::Point(2,2);
+        partialReview.mouse(cv::EVENT_LBUTTONDOWN,partialHit.x,partialHit.y,0);partialReview.mouse(cv::EVENT_LBUTTONUP,partialDrop.x,partialDrop.y,0);
+        const auto manual=partialReview.records()[0].leftManualMarkers;
+        Check(manual.ids.size()==35 && manual.missing()==std::vector<int>{0} && partialReview.records()[0].sample.pair.left.empty() &&
+              cv::norm(manual.corners[4][0]-(partial.leftMarkers.corners[4][0]+cv::Point2f(2./partialReview.viewport(0).scale(),2./partialReview.viewport(0).scale())))<1e-4,
+              "Partial stereo correction lost native coordinates or synthesized a complete board");
+        partialReview.key(' ');Check(Selected(partialReview.records()).empty(),"Partial manual stereo correction was accepted");partialReview.finish();
+        partialSettings.output=root/"PartialReload";Review partialReload(partialSettings,partialCameraLeft,partialCameraRight);
+        partialReload.update();Check(partialReload.records()[0].leftManualMarkers.corners==manual.corners,"Partial stereo correction did not resume");partialReload.finish();
         // Create an offline dataset with known projected observations for an actual incremental constrained fit.
         const fs::path input=root/"Input";fs::create_directories(input/"left");fs::create_directory(input/"right");
         for(int i=1;i<=4;++i) {fs::copy_file(root/"capture/left/000001.bmp",input/"left"/(std::to_string(i)+".bmp"));fs::copy_file(root/"capture/right/000001.bmp",input/"right"/(std::to_string(i)+".bmp"));}
@@ -139,6 +155,28 @@ int main() {
         Poll(review,[&]{return review.records()[3].sample.pair.left.size()==aprilgrid::kPointCount && review.records()[3].sample.pair.right.size()==aprilgrid::kPointCount;});
         Check(cv::imwrite((root/"roi-dashboard.png").string(),review.render()),"Cannot render native ROI overlay");
         review.key(' ');Check(review.records()[3].state==Record::State::Accepted,"Complete manual ROIs could not be accepted");
+        const auto originalLeft=review.records()[3].sample.pair.left,originalRight=review.records()[3].sample.pair.right;
+        const auto originalLeftRoi=review.records()[3].leftRoi,originalRightRoi=review.records()[3].rightRoi;
+        review.key('e');review.key('3');review.key('3');
+        for(int side=0;side<2;++side) {
+            const auto& originalPoints=side==0?originalLeft:originalRight;
+            const cv::Point hit=review.viewport(side).project(originalPoints[0]),drop=hit+cv::Point(3,2);
+            review.mouse(cv::EVENT_LBUTTONDOWN,hit.x,hit.y,0);review.mouse(cv::EVENT_MOUSEMOVE,drop.x,drop.y,cv::EVENT_FLAG_LBUTTON);
+            review.mouse(cv::EVENT_LBUTTONUP,drop.x,drop.y,0);
+            const auto& record=review.records()[3];const auto& edited=side==0?record.sample.pair.left:record.sample.pair.right;
+            Check(record.state==Record::State::Pending && review.solution().R.empty() && record.leftRoi==originalLeftRoi && record.rightRoi==originalRightRoi &&
+                  cv::norm(edited[0]-(originalPoints[0]+cv::Point2f(3./review.viewport(side).scale(),2./review.viewport(side).scale())))<1e-4,
+                  "Stereo manual edit retained a stale fit or lost zoom/native geometry");
+            Check((side==0?record.sample.pair.right:record.sample.pair.left)==(side==0?originalRight:originalLeft),"Corner edit leaked into the other camera");
+            auto saved=ReadDataset(input);LoadAnnotations(input/"annotations.yaml",saved.records,left.referenceSize,right.referenceSize);
+            Check((side==0?saved.records[3].sample.pair.left:saved.records[3].sample.pair.right)==edited,"Stereo manual corner did not persist");
+            review.key('z');Check(review.records()[3].sample.pair.left==originalLeft && review.records()[3].sample.pair.right==originalRight,"Stereo undo restored the wrong camera");
+        }
+        Check(cv::imwrite((root/"corner-editor.png").string(),review.render()),"Cannot render stereo manual corner handles");
+        const cv::Point editHit=review.viewport(1).project(originalRight[0]);
+        review.mouse(cv::EVENT_LBUTTONDOWN,editHit.x,editHit.y,0);review.mouse(cv::EVENT_LBUTTONUP,editHit.x+2,editHit.y+1,0);
+        const auto committed=review.records()[3].sample.pair.right;review.key(' ');
+        Check(Selected(review.records()).back().pair.right==committed,"Reaccepting stereo pair ignored manual corners");
         review.key('d');Check(review.records()[3].state==Record::State::Pending && review.solution().R.empty(),"Removed pair left stale fit metrics visible");
         Poll(review,[&]{return review.solution().pairs.size()==3;});
         review.key('s');const int result=review.finish();Check(result==0,"Valid offline ROI fit did not pass quality checks");
