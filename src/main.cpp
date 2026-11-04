@@ -95,7 +95,8 @@ bool sendYawCommand(double relativeYaw, const dart_mcu::ReceivedStatus& status,
                   << " deg, maximum=17 deg\n";
         return false;
     }
-    if (relativeYaw <= 0.0001745329){
+    // 小于等于约0.01度时不调整；按绝对值判断，左右两个方向使用相同门限。
+    if (std::abs(relativeYaw) <= 0.0001745329) {
         return false;
     }
     communication->send({0, relativeYaw, 0}, std::chrono::milliseconds(params.writeTimeoutMs));

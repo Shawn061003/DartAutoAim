@@ -172,6 +172,14 @@ void testYawAngleLimit()
     mcu.publish(true);
     auto status = communication->latestStatus(std::chrono::seconds(1));
     require(status.has_value(), "Missing angle-limit fixture status");
+    // 小角度门控应同时覆盖左右方向；拒绝后不写串口、不改变角度和命令历史。
+    constexpr double minimumYaw = 0.0001745329;
+    for (const double smallYaw : {0.0, minimumYaw, -minimumYaw, minimumYaw / 2, -minimumYaw / 2}) {
+        require(!sendYawCommand(smallYaw, *status, communicationParams), "Small signed yaw passed deadband");
+        require(!mcu.hasCommand() && current_angle == 16.0 * CV_PI / 180.0 &&
+                lastCommandStatusSequence == 0 && lastCommandAt == std::chrono::steady_clock::time_point{},
+                "Deadband rejection changed command history or wrote bytes");
+    }
     const double originalAngle = current_angle;
     require(!sendYawCommand(2.0 * CV_PI / 180.0, *status, communicationParams),
             "Command exceeding 17 degrees was accepted");
@@ -188,8 +196,12 @@ void testYawAngleLimit()
     current_angle = 17.0 * CV_PI / 180.0;
     mcu.publish(true);
     status = communication->latestStatus(std::chrono::seconds(1));
-    require(sendYawCommand(0.0, *status, communicationParams), "Exactly 17 degrees was rejected");
-    mcu.expectCommand(0.0);
+    const auto beforeZeroSequence = lastCommandStatusSequence;
+    const auto beforeZeroAt = lastCommandAt;
+    require(!sendYawCommand(0.0, *status, communicationParams) && !mcu.hasCommand(),
+            "Zero yaw was transmitted at the angle limit");
+    require(current_angle == 17.0 * CV_PI / 180.0 && lastCommandStatusSequence == beforeZeroSequence &&
+            lastCommandAt == beforeZeroAt, "Zero-yaw rejection changed command history");
 
     const auto previousSequence = lastCommandStatusSequence;
     const auto previousAt = lastCommandAt;
