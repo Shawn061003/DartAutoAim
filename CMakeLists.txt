@@ -191,6 +191,13 @@ if(DART_BUILD_MAIN)
 
     if(BUILD_TESTING)
         # 相机主循环测试使用设备/感知替身；验证配对、退出和显示数据传递，不访问相机或窗口。
+        add_executable(dart_location_transform_test tests/test_location_transform.cpp
+            src/Computation/LocationTransform.cpp src/Computation/YawSolver.cpp)
+        target_include_directories(dart_location_transform_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${OpenCV_INCLUDE_DIRS})
+        target_link_libraries(dart_location_transform_test PRIVATE opencv_core)
+        target_compile_options(dart_location_transform_test PRIVATE -Wall -Wextra -Wpedantic)
+        add_test(NAME location_transform COMMAND dart_location_transform_test)
+
         add_executable(dart_camera_mode_test tests/test_camera_mode.cpp)
         target_sources(dart_camera_mode_test PRIVATE
             src/Visualization/VisualizeAdapter.cpp

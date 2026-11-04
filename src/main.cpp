@@ -351,7 +351,7 @@ int runImageMode(const DartCongfig& config)
     std::cout << "Visual detection completed: left_frame=" << frame->left.frame_id
               << " right_frame=" << frame->right.frame_id << '\n';
     const auto measurements = measurement.RunMeasurement(detections);
-    const auto locations = locationtransform.RunTransform(measurements);
+    const auto locations = locationtransform.RunTransform(measurements, aim_base);
 
     // ----------------------------------------------------------------
     // step4  显示位置结果，等待按键或关闭窗口后清理
@@ -440,7 +440,7 @@ int runCameraMode(const DartCongfig& config)
         // 右图有有效目标时执行测距；搜索时使用空位置结果。
         std::vector<StereoscopicMeasurement::StereoscopicMeasurementResult> measurements;
         if (!needSearch) measurements = stereoscopicmeasurement.RunMeasurement(detections);
-        const auto locations = locationtransform.RunTransform(measurements);
+        const auto locations = locationtransform.RunTransform(measurements, aim_base);
 
         // 按类别打印本帧全部匹配，不假设BASE/OUTPOST与数组下标固定对应。
         printMeasurements(*frame, detections, measurements, locations);

@@ -457,10 +457,10 @@ int main(int argc, char** argv)
         const cv::Mat dartRotation = (cv::Mat_<double>(3, 3) << 1, 0, 0, 0, 0, 1, 0, -1, 0);
         const cv::Mat dartTranslation = (cv::Mat_<double>(3, 1) << 240, -18.83, 231.45);
         const LocationTransform locationtransform(dartRotation, dartTranslation);
-        const auto locations = locationtransform.RunTransform(measured);
+        const auto locations = locationtransform.RunTransform(measured, true);
         const auto visual = visualization::makeLocationVisualize(locations);
         require(visual.targets.size() == 1, "Location adapter lost target");
-        require(cv::norm(visual.targets[0].position_m - cv::Point3d(0.740, 23.98117, 1.03145)) < 0.001,
+        require(cv::norm(visual.targets[0].position_m - cv::Point3d(0.7905032099339858, 24.98186449492442, 1.03145)) < 0.001,
                 "Visualization must use transformed dart coordinates in meters");
         require(visual.targets[0].target_class == StereoscopicMeasurementVisualize::TargetClassVisualize::BASE,
                 "Location adapter lost target class");
@@ -479,7 +479,7 @@ int main(int argc, char** argv)
                 auto latest = synthetic;
                 for (auto& d : latest.left) d.CenterPoint.x += controlMotionPerFrame*frame;
                 for (auto& d : latest.right) d.CenterPoint.x += controlMotionPerFrame*frame;
-                const auto expectedLocations = actualTransform.RunTransform(estimator.RunMeasurement(latest));
+                const auto expectedLocations = actualTransform.RunTransform(estimator.RunMeasurement(latest), true);
                 require(expectedLocations.size() == 1, "Synthetic KF target missing");
                 const auto filtered = expectedFilter.RunKalmanFilter(expectedLocations.front());
                 if (filtered.stable) {
