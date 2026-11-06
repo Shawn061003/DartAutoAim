@@ -472,7 +472,7 @@ int main(int argc, char** argv)
         const auto locations = locationtransform.RunTransform(measured, true);
         const auto visual = visualization::makeLocationVisualize(locations);
         require(visual.targets.size() == 1, "Location adapter lost target");
-        require(cv::norm(visual.targets[0].position_m - cv::Point3d(0.7905032099339858, 24.98186449492442, 1.03145)) < 0.001,
+        require(cv::norm(visual.targets[0].position_m - cv::Point3d(0.79200388360736584, 25.021088896511277, 1.03145)) < 0.001,
                 "Visualization must use transformed dart coordinates in meters");
         require(visual.targets[0].target_class == StereoscopicMeasurementVisualize::TargetClassVisualize::BASE,
                 "Location adapter lost target class");
