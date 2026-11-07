@@ -16,12 +16,12 @@ int showDetection(const StereoFrame& frame,
                   const GuideLightDetect::StereoDetectResult& detections,
                   int delayMs = 1);
 
-// 镖口坐标由毫米转为米，保留BASE/OUTPOST类别；空输入生成空面板数据。
+// 镖口坐标由毫米转为米，角度由弧度转为度；空位置输入仍保留当前角度。
 StereoscopicMeasurementVisualize::FrameVisualize makeLocationVisualize(
-    const std::vector<LocationTransform::LocationTransformResult>& locations);
+    const std::vector<LocationTransform::LocationTransformResult>& locations, double currentAngleRad);
 
 // delayMs原样传给显示接口：0等待按键，-1只提交位置画面。
 int showLocations(const std::vector<LocationTransform::LocationTransformResult>& locations,
-                  int delayMs = 1);
+                  double currentAngleRad, int delayMs = 1);
 
 } // namespace visualization

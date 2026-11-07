@@ -358,7 +358,7 @@ int runImageMode(const DartCongfig& config)
     // step4  显示位置结果，等待按键或关闭窗口后清理
     // ----------------------------------------------------------------
     // 模式键只更新选择；其它按键或关闭全部窗口结束本次图片处理。
-    while (handleAimModeKey(visualization::showLocations(locations, 0))) {}
+    while (handleAimModeKey(visualization::showLocations(locations, current_angle, 0))) {}
     cv::destroyAllWindows();
     return 0;
 }
@@ -496,7 +496,7 @@ int runCameraMode(const DartCongfig& config)
         // ----------------------------------------------------------------
         // 只显示当前所选目标的KF输出；本帧无滤波结果时清空，不显示原始或历史位置。
         // 窗口事件和目标切换统一在 processFrame 中处理。
-        visualization::showLocations(filteredLocations, -1);
+        visualization::showLocations(filteredLocations, current_angle, -1);
         if (stopSignals.stopRequested()) break;
 
         // ----------------------------------------------------------------

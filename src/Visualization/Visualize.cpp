@@ -348,6 +348,10 @@ cv::Mat StereoscopicMeasurementVisualize::Draw(const FrameVisualize& data)
     cv::Mat canvas(800, 1280, CV_8UC3, kBackground);
     label(canvas, "空间定位", {28, 47}, kText, 30);
     label(canvas, "镖口坐标系", {172, 44}, kMuted, 18);
+    label(canvas, "当前角度", {620, 43}, kMuted, 18);
+    label(canvas, std::isfinite(data.current_angle_deg)
+              ? cv::format("%.2f°", data.current_angle_deg) : "—",
+          {718, 46}, kAccent, 26);
     const auto validCount = std::count_if(data.targets.begin(), data.targets.end(), [](const auto& target) {
         return finitePosition(target.position_m);
     });

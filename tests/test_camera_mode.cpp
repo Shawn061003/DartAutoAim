@@ -405,6 +405,8 @@ int StereoscopicMeasurementVisualize::Show(const FrameVisualize& data, int delay
     ++measurementShows;
     require(delayMs == -1, "Measurement visualization must not read keyboard input");
     require(guideShows == measurementShows, "Measurement shown before detection");
+    require(std::abs(data.current_angle_deg - current_angle * 180.0 / CV_PI) < 1e-12,
+            "Location display did not receive the current angle in degrees");
     if (controlRun) {
         const auto motor = communication->latestStatus(
             std::chrono::milliseconds(communicationParams.statusMaxAgeMs));
@@ -470,13 +472,18 @@ int main(int argc, char** argv)
         const cv::Mat dartTranslation = (cv::Mat_<double>(3, 1) << 240, -18.83, 231.45);
         const LocationTransform locationtransform(dartRotation, dartTranslation);
         const auto locations = locationtransform.RunTransform(measured, true);
-        const auto visual = visualization::makeLocationVisualize(locations);
+        const auto visual = visualization::makeLocationVisualize(locations, CV_PI / 6.0);
+        require(std::abs(visual.current_angle_deg - 30.0) < 1e-12,
+                "Location adapter failed radians-to-degrees conversion");
         require(visual.targets.size() == 1, "Location adapter lost target");
         require(cv::norm(visual.targets[0].position_m - cv::Point3d(0.79200388360736584, 25.021088896511277, 1.03145)) < 0.001,
                 "Visualization must use transformed dart coordinates in meters");
         require(visual.targets[0].target_class == StereoscopicMeasurementVisualize::TargetClassVisualize::BASE,
                 "Location adapter lost target class");
-        require(visualization::makeLocationVisualize({}).targets.empty(), "Empty locations created a stale target");
+        const auto emptyVisual = visualization::makeLocationVisualize({}, -CV_PI / 4.0);
+        require(emptyVisual.targets.empty(), "Empty locations created a stale target");
+        require(std::abs(emptyVisual.current_angle_deg + 45.0) < 1e-12,
+                "Empty locations lost the current angle");
         // 真实运行主循环的 yaw 发送分支，比较当前目标求解值和电控实际收到的命令。
         controlDetections = synthetic;
         const LocationTransform actualTransform(config.locationTransform.R, config.locationTransform.T);

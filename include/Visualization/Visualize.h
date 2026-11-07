@@ -79,6 +79,7 @@ public:
     };
     struct FrameVisualize {
         std::vector<TargetVisualize> targets;
+        double current_angle_deg = std::numeric_limits<double>::quiet_NaN(); // 当前角度估计，单位度。
     };
     struct MetricsVisualize {
         double horizontal_distance_m = 0.0; // 到镖口原点的XY投影距离。

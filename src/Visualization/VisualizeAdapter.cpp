@@ -30,9 +30,10 @@ GuideLightDetectVisualize::FrameVisualize makeGuideLightVisualize(
 } // namespace
 
 StereoscopicMeasurementVisualize::FrameVisualize makeLocationVisualize(
-    const std::vector<LocationTransform::LocationTransformResult>& locations)
+    const std::vector<LocationTransform::LocationTransformResult>& locations, double currentAngleRad)
 {
     StereoscopicMeasurementVisualize::FrameVisualize data;
+    data.current_angle_deg = currentAngleRad * 180.0 / CV_PI;
     data.targets.reserve(locations.size());
     using ClassVisualize = StereoscopicMeasurementVisualize::TargetClassVisualize;
     for (const auto& result : locations) {
@@ -56,9 +57,9 @@ int showDetection(const StereoFrame& frame,
 }
 
 int showLocations(const std::vector<LocationTransform::LocationTransformResult>& locations,
-                  int delayMs)
+                  double currentAngleRad, int delayMs)
 {
-    return StereoscopicMeasurementVisualize::Show(makeLocationVisualize(locations), delayMs);
+    return StereoscopicMeasurementVisualize::Show(makeLocationVisualize(locations, currentAngleRad), delayMs);
 }
 
 } // namespace visualization

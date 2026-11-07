@@ -88,6 +88,7 @@ int main(int argc, char* argv[])
         require(StereoscopicMeasurementVisualize::Metrics({0, 0, 0}).height_m == 0.0,
                 "Dart origin must remain valid");
         StereoscopicMeasurementVisualize::FrameVisualize scene;
+        scene.current_angle_deg = 15.8;
         using ClassVisualize = StereoscopicMeasurementVisualize::TargetClassVisualize;
         scene.targets.push_back({{0.4, 24.4, 1.2}, ClassVisualize::BASE});
         scene.targets.push_back({{-0.2, 15.2, 0.5}, ClassVisualize::OUTPOST});
