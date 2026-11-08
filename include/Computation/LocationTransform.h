@@ -32,12 +32,12 @@ public:
           rightCameraToDartTmm_(rightCameraToDartTmm.clone()) {}
     
     /// @brief 将双目测距结果转换到镖口坐标系并补偿XY，输入输出均为毫米。
-    /// @param aim_base true使用表二远段模型，false使用表一近段模型；作用于本批所有结果。
+    /// @param aim_base true使用基地远段模型，false使用前哨站近段模型；作用于本批所有结果。
     /// @pre 各项RealLocation有限，且位于原始右相机坐标系。
     /// @return 按输入顺序返回转换后的坐标和原目标类别；空输入返回空列表。
     /// @note 先R/T转换，直接对当前镖口坐标应用XY补偿，不附加固定yaw旋转。
-    ///       模型以表三角度逆旋转后的真值拟合，直接接收未调零的镖口XY；Z只做R/T转换。
-    ///       模型仅在本次固定安装和近/远采样范围验证，未自动裁剪范围。
+    ///       模型接收未补偿的镖口XY；Z只做R/T转换。
+    ///       基地远段模型按15.8°固定姿态采样拟合，未自动裁剪范围。
     std::vector<LocationTransformResult> RunTransform(
         const std::vector<StereoscopicMeasurement::StereoscopicMeasurementResult>& results, bool aim_base) const;
 
