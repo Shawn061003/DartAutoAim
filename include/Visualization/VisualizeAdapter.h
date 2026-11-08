@@ -18,10 +18,13 @@ int showDetection(const StereoFrame& frame,
 
 // 镖口坐标由毫米转为米，角度由弧度转为度；空位置输入仍保留当前角度。
 StereoscopicMeasurementVisualize::FrameVisualize makeLocationVisualize(
-    const std::vector<LocationTransform::LocationTransformResult>& locations, double currentAngleRad);
+    const std::vector<LocationTransform::LocationTransformResult>& rawLocations,
+    const std::vector<LocationTransform::LocationTransformResult>& filteredLocations,
+    double currentAngleRad, bool kalmanEnabled = true);
 
 // delayMs原样传给显示接口：0等待按键，-1只提交位置画面。
-int showLocations(const std::vector<LocationTransform::LocationTransformResult>& locations,
-                  double currentAngleRad, int delayMs = 1);
+int showLocations(const std::vector<LocationTransform::LocationTransformResult>& rawLocations,
+                  const std::vector<LocationTransform::LocationTransformResult>& filteredLocations,
+                  double currentAngleRad, int delayMs = 1, bool kalmanEnabled = true);
 
 } // namespace visualization

@@ -30,18 +30,25 @@ GuideLightDetectVisualize::FrameVisualize makeGuideLightVisualize(
 } // namespace
 
 StereoscopicMeasurementVisualize::FrameVisualize makeLocationVisualize(
-    const std::vector<LocationTransform::LocationTransformResult>& locations, double currentAngleRad)
+    const std::vector<LocationTransform::LocationTransformResult>& rawLocations,
+    const std::vector<LocationTransform::LocationTransformResult>& filteredLocations,
+    double currentAngleRad, bool kalmanEnabled)
 {
     StereoscopicMeasurementVisualize::FrameVisualize data;
     data.current_angle_deg = currentAngleRad * 180.0 / CV_PI;
-    data.targets.reserve(locations.size());
+    data.kalman_enabled = kalmanEnabled;
     using ClassVisualize = StereoscopicMeasurementVisualize::TargetClassVisualize;
-    for (const auto& result : locations) {
-        auto category = ClassVisualize::UNKNOWN;
-        if (result.TargetName == TargetClasses::BASE) category = ClassVisualize::BASE;
-        else if (result.TargetName == TargetClasses::OUTPOST) category = ClassVisualize::OUTPOST;
-        data.targets.push_back({result.RealLocation * 0.001, category});
-    }
+    const auto convert = [](const auto& locations, auto& targets) {
+        targets.reserve(locations.size());
+        for (const auto& result : locations) {
+            auto category = ClassVisualize::UNKNOWN;
+            if (result.TargetName == TargetClasses::BASE) category = ClassVisualize::BASE;
+            else if (result.TargetName == TargetClasses::OUTPOST) category = ClassVisualize::OUTPOST;
+            targets.push_back({result.RealLocation * 0.001, category});
+        }
+    };
+    convert(rawLocations, data.raw_targets);
+    if (kalmanEnabled) convert(filteredLocations, data.targets);
     return data;
 }
 
@@ -56,10 +63,12 @@ int showDetection(const StereoFrame& frame,
                                    makeGuideLightVisualize(frame.right, detections.right), delayMs);
 }
 
-int showLocations(const std::vector<LocationTransform::LocationTransformResult>& locations,
-                  double currentAngleRad, int delayMs)
+int showLocations(const std::vector<LocationTransform::LocationTransformResult>& rawLocations,
+                  const std::vector<LocationTransform::LocationTransformResult>& filteredLocations,
+                  double currentAngleRad, int delayMs, bool kalmanEnabled)
 {
-    return StereoscopicMeasurementVisualize::Show(makeLocationVisualize(locations, currentAngleRad), delayMs);
+    return StereoscopicMeasurementVisualize::Show(
+        makeLocationVisualize(rawLocations, filteredLocations, currentAngleRad, kalmanEnabled), delayMs);
 }
 
 } // namespace visualization

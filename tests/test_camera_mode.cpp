@@ -408,6 +408,7 @@ int StereoscopicMeasurementVisualize::Show(const FrameVisualize& data, int delay
     require(std::abs(data.current_angle_deg - current_angle * 180.0 / CV_PI) < 1e-12,
             "Location display did not receive the current angle in degrees");
     if (controlRun) {
+        require(!data.raw_targets.empty(), "Raw measurements were lost before visualization");
         const auto motor = communication->latestStatus(
             std::chrono::milliseconds(communicationParams.statusMaxAgeMs));
         const bool hasFilteredTarget = motor && motor->status.is_stationary == 1 &&
@@ -472,18 +473,29 @@ int main(int argc, char** argv)
         const cv::Mat dartTranslation = (cv::Mat_<double>(3, 1) << 240, -18.83, 231.45);
         const LocationTransform locationtransform(dartRotation, dartTranslation);
         const auto locations = locationtransform.RunTransform(measured, true);
-        const auto visual = visualization::makeLocationVisualize(locations, CV_PI / 6.0);
+        auto filteredLocations = locations;
+        filteredLocations[0].RealLocation.x += 100.0;
+        const auto visual = visualization::makeLocationVisualize(locations, filteredLocations, CV_PI / 6.0);
         require(std::abs(visual.current_angle_deg - 30.0) < 1e-12,
                 "Location adapter failed radians-to-degrees conversion");
         require(visual.targets.size() == 1, "Location adapter lost target");
-        require(cv::norm(visual.targets[0].position_m - cv::Point3d(0.79200388360736584, 25.021088896511277, 1.03145)) < 0.001,
+        require(visual.raw_targets.size() == 1, "Raw location adapter lost target");
+        require(cv::norm(visual.raw_targets[0].position_m - cv::Point3d(0.79200388360736584, 25.021088896511277, 1.03145)) < 0.001,
                 "Visualization must use transformed dart coordinates in meters");
+        require(cv::norm(visual.targets[0].position_m - visual.raw_targets[0].position_m - cv::Point3d(0.1, 0, 0)) < 1e-12,
+                "Raw and filtered locations were mixed");
         require(visual.targets[0].target_class == StereoscopicMeasurementVisualize::TargetClassVisualize::BASE,
                 "Location adapter lost target class");
-        const auto emptyVisual = visualization::makeLocationVisualize({}, -CV_PI / 4.0);
+        const auto emptyVisual = visualization::makeLocationVisualize({}, {}, -CV_PI / 4.0);
         require(emptyVisual.targets.empty(), "Empty locations created a stale target");
         require(std::abs(emptyVisual.current_angle_deg + 45.0) < 1e-12,
                 "Empty locations lost the current angle");
+        const auto rawOnly = visualization::makeLocationVisualize(locations, {}, 0);
+        require(rawOnly.targets.empty() && rawOnly.raw_targets.size() == 1,
+                "Missing filter output must not be replaced by a raw measurement");
+        const auto imageVisual = visualization::makeLocationVisualize(locations, {}, 0, false);
+        require(!imageVisual.kalman_enabled && imageVisual.targets.empty() && imageVisual.raw_targets.size() == 1,
+                "Image mode must identify unfiltered measurements");
         // 真实运行主循环的 yaw 发送分支，比较当前目标求解值和电控实际收到的命令。
         controlDetections = synthetic;
         const LocationTransform actualTransform(config.locationTransform.R, config.locationTransform.T);

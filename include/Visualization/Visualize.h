@@ -78,7 +78,9 @@ public:
         TargetClassVisualize target_class = TargetClassVisualize::UNKNOWN;
     };
     struct FrameVisualize {
-        std::vector<TargetVisualize> targets;
+        std::vector<TargetVisualize> targets; // 当前帧的卡尔曼滤波输出。
+        std::vector<TargetVisualize> raw_targets; // 同一镖口坐标系下、滤波前的测量。
+        bool kalman_enabled = true; // 图片模式未启用滤波，图中显示原始测量。
         double current_angle_deg = std::numeric_limits<double>::quiet_NaN(); // 当前角度估计，单位度。
     };
     struct MetricsVisualize {

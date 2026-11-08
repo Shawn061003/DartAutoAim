@@ -92,6 +92,9 @@ int main(int argc, char* argv[])
         using ClassVisualize = StereoscopicMeasurementVisualize::TargetClassVisualize;
         scene.targets.push_back({{0.4, 24.4, 1.2}, ClassVisualize::BASE});
         scene.targets.push_back({{-0.2, 15.2, 0.5}, ClassVisualize::OUTPOST});
+        // 原始集合故意反序，数值区必须按类别匹配，不能依赖数组下标。
+        scene.raw_targets = {{{-0.24, 15.27, 0.53}, ClassVisualize::OUTPOST},
+                             {{0.46, 24.48, 1.24}, ClassVisualize::BASE}};
         const auto measurement = StereoscopicMeasurementVisualize::Draw(scene);
         require(measurement.size() == cv::Size(1280, 800), "Unexpected measurement panel size");
         // 当前范围内0.5m方格等比例缩放：检验XY与YZ两图的实际目标中心。
@@ -105,6 +108,12 @@ int main(int argc, char* argv[])
         }
         scene.targets.clear();
         const auto blank = StereoscopicMeasurementVisualize::Draw(scene);
+        const cv::Rect rawRow(24, 145, 604, 27);
+        const cv::Rect filteredRow(24, 181, 604, 29);
+        require(cv::norm(blank(rawRow), measurement(rawRow), cv::NORM_INF) == 0,
+                "Missing filter output changed the raw measurement row");
+        require(cv::norm(blank(filteredRow), measurement(filteredRow), cv::NORM_INF) > 0,
+                "Missing filter output retained stale numbers");
         const cv::Rect charts(24, 240, 1232, 520);
         require(cv::norm(blank(charts), measurement(charts), cv::NORM_INF) > 0,
                 "Empty measurement retained stale target markers");

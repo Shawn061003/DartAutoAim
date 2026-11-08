@@ -345,6 +345,8 @@ StereoscopicMeasurementVisualize::MetricsVisualize StereoscopicMeasurementVisual
 
 cv::Mat StereoscopicMeasurementVisualize::Draw(const FrameVisualize& data)
 {
+    // 实时模式图形仍只使用KF结果；图片模式明确使用原始测量。
+    const auto& plotTargets = data.kalman_enabled ? data.targets : data.raw_targets;
     cv::Mat canvas(800, 1280, CV_8UC3, kBackground);
     label(canvas, "空间定位", {28, 47}, kText, 30);
     label(canvas, "镖口坐标系", {172, 44}, kMuted, 18);
@@ -352,7 +354,7 @@ cv::Mat StereoscopicMeasurementVisualize::Draw(const FrameVisualize& data)
     label(canvas, std::isfinite(data.current_angle_deg)
               ? cv::format("%.2f°", data.current_angle_deg) : "—",
           {718, 46}, kAccent, 26);
-    const auto validCount = std::count_if(data.targets.begin(), data.targets.end(), [](const auto& target) {
+    const auto validCount = std::count_if(plotTargets.begin(), plotTargets.end(), [](const auto& target) {
         return finitePosition(target.position_m);
     });
     cv::circle(canvas, {1070, 36}, 4, validCount > 0 ? kAccent : kMuted, cv::FILLED);
@@ -366,28 +368,33 @@ cv::Mat StereoscopicMeasurementVisualize::Draw(const FrameVisualize& data)
         panel(canvas, card);
         const auto color = targetColor(category);
         label(canvas, targetName(category), {cardX + 18, 113}, color, 22);
-        const auto found = std::find_if(data.targets.begin(), data.targets.end(), [category](const auto& target) {
-            return target.target_class == category && finitePosition(target.position_m);
-        });
-        label(canvas, "X", {cardX + 18, 143}, kMuted, 15);
-        label(canvas, "Y", {cardX + 162, 143}, kMuted, 15);
-        label(canvas, "Z", {cardX + 306, 143}, kMuted, 15);
-        label(canvas, "水平距离", {cardX + 450, 143}, kMuted, 15);
-        if (found != data.targets.end()) {
-            const auto metrics = Metrics(found->position_m);
-            label(canvas, cv::format("%+.2f", found->position_m.x),
-                  {cardX + 18, 191}, kText, 30);
-            label(canvas, cv::format("%+.2f", found->position_m.y),
-                  {cardX + 162, 191}, kText, 30);
-            label(canvas, cv::format("%+.2f", found->position_m.z),
-                  {cardX + 306, 191}, kText, 30);
-            label(canvas, cv::format("%.2f", metrics.horizontal_distance_m),
-                  {cardX + 450, 191}, kText, 30);
-        } else {
-            for (const int offset : {18, 162, 306, 450})
-                label(canvas, "—", {cardX + offset, 188}, kMuted, 30);
-            label(canvas, "未发现", {cardX + 520, 111}, kMuted, 16);
-        }
+        label(canvas, "X", {cardX + 122, 137}, kMuted, 15);
+        label(canvas, "Y", {cardX + 234, 137}, kMuted, 15);
+        label(canvas, "Z", {cardX + 346, 137}, kMuted, 15);
+        label(canvas, "水平距离", {cardX + 458, 137}, kMuted, 15);
+        const auto drawValues = [&](const auto& targets, const char* title, int baseline,
+                                    const cv::Scalar& textColor, bool enabled) {
+            label(canvas, title, {cardX + 18, baseline - 3}, textColor, 16);
+            const auto found = std::find_if(targets.begin(), targets.end(), [category](const auto& target) {
+                return target.target_class == category && finitePosition(target.position_m);
+            });
+            if (enabled && found != targets.end()) {
+                const auto& p = found->position_m;
+                label(canvas, cv::format("%+.2f", p.x), {cardX + 122, baseline}, textColor, 24);
+                label(canvas, cv::format("%+.2f", p.y), {cardX + 234, baseline}, textColor, 24);
+                label(canvas, cv::format("%+.2f", p.z), {cardX + 346, baseline}, textColor, 24);
+                label(canvas, cv::format("%.2f", Metrics(p).horizontal_distance_m),
+                      {cardX + 458, baseline}, textColor, 24);
+            } else {
+                for (const int offset : {122, 234, 346, 458})
+                    label(canvas, "—", {cardX + offset, baseline}, kMuted, 24);
+            }
+        };
+        drawValues(data.raw_targets, "原始测量", 168, kText, true);
+        cv::line(canvas, {cardX + 18, 177}, {cardX + 586, 177}, kBorder, 1);
+        drawValues(data.targets, "卡尔曼滤波", 204, color, data.kalman_enabled);
+        if (!data.kalman_enabled)
+            label(canvas, "滤波未启用", {cardX + 490, 111}, kMuted, 15);
         cardX += 628;
     }
 
@@ -401,7 +408,7 @@ cv::Mat StereoscopicMeasurementVisualize::Draw(const FrameVisualize& data)
     const cv::Rect sidePlot(676, 298, 556, 410);
 
     double xRadius = 2.0, yMin = -1.0, yMax = 27.0, zMin = -1.0, zMax = 3.0;
-    for (const auto& target : data.targets) {
+    for (const auto& target : plotTargets) {
         if (!finitePosition(target.position_m)) continue;
         const auto& p = target.position_m;
         xRadius = std::max(xRadius, std::abs(p.x) + 2.0);
@@ -424,7 +431,7 @@ cv::Mat StereoscopicMeasurementVisualize::Draw(const FrameVisualize& data)
     const auto sideOrigin = plotPoint({0, 0}, sideDomain, sidePlot);
     cv::line(canvas, {topOrigin.x, topPlot.y}, {topOrigin.x, topPlot.y + topPlot.height}, kBorder, 1);
     cv::line(canvas, {sidePlot.x, sideOrigin.y}, {sidePlot.x + sidePlot.width, sideOrigin.y}, kBorder, 1);
-    for (const auto& target : data.targets) {
+    for (const auto& target : plotTargets) {
         if (!finitePosition(target.position_m)) continue;
         const auto& p = target.position_m;
         const auto top = plotPoint({p.x, p.y}, topDomain, topPlot);
@@ -442,7 +449,9 @@ cv::Mat StereoscopicMeasurementVisualize::Draw(const FrameVisualize& data)
     label(canvas, "横向 X →", {487, 745}, kMuted, 16);
     label(canvas, "前向 Y →", {1115, 745}, kMuted, 16);
     label(canvas, "单位：米  ·  网格：0.5 米", {28, 786}, kMuted, 15);
-    const auto invalidCount = data.targets.size() - static_cast<std::size_t>(validCount);
+    label(canvas, data.kalman_enabled ? "图中显示：卡尔曼滤波" : "图中显示：原始测量",
+          {420, 786}, kMuted, 15);
+    const auto invalidCount = plotTargets.size() - static_cast<std::size_t>(validCount);
     if (invalidCount > 0)
         label(canvas, "无效坐标已忽略", {1100, 786}, kOrange, 15);
     return canvas;
