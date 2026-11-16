@@ -19,6 +19,7 @@
 namespace fake {
 struct Device {
     unsigned int ip;
+    bool usb = false;
     bool opened = false;
     bool grabbing = false;
     bool leased = false;
@@ -28,6 +29,7 @@ struct Device {
 std::atomic<int> handles{0}, leases{0}, gets{0}, frees{0}, activeGets{0};
 std::atomic<int> initializations{0}, finalizations{0}, violations{0};
 int grabStrategyResult = MV_OK;
+unsigned int usbDeviceCount = 0;
 bool failRightOpen = false;
 bool failConvert = false;
 bool timeout = false;
@@ -46,6 +48,7 @@ void reset()
     failRightOpen = failConvert = timeout = wrongSize = truncated = lostPacket = rgb = false;
     connected = true;
     grabStrategyResult = MV_OK;
+    usbDeviceCount = 0;
 }
 } // namespace fake
 
@@ -57,11 +60,25 @@ int MV_CC_Finalize()
     ++fake::finalizations;
     return MV_OK;
 }
+int MV_CC_EnumDevices(unsigned int transport, MV_CC_DEVICE_INFO_LIST* list)
+{
+    if (transport != MV_USB_DEVICE) return static_cast<int>(MV_E_PARAMETER);
+    static MV_CC_DEVICE_INFO left{}, other{};
+    left.nTLayerType = other.nTLayerType = MV_USB_DEVICE;
+    list->nDeviceNum = fake::usbDeviceCount;
+    list->pDeviceInfo[0] = &left;
+    list->pDeviceInfo[1] = &other;
+    return MV_OK;
+}
 int MV_CC_CreateHandle(void** handle, const MV_CC_DEVICE_INFO* info)
 {
-    if (info->nTLayerType != MV_GIGE_DEVICE || info->SpecialInfo.stGigEInfo.nNetExport != 0xc0a80101)
+    if (info->nTLayerType == MV_USB_DEVICE) {
+        *handle = new fake::Device{0, true};
+    } else if (info->nTLayerType == MV_GIGE_DEVICE && info->SpecialInfo.stGigEInfo.nNetExport == 0xc0a80101) {
+        *handle = new fake::Device{info->SpecialInfo.stGigEInfo.nCurrentIp};
+    } else {
         return static_cast<int>(MV_E_PARAMETER);
-    *handle = new fake::Device{info->SpecialInfo.stGigEInfo.nCurrentIp};
+    }
     ++fake::handles;
     return MV_OK;
 }
@@ -87,8 +104,16 @@ int MV_CC_DestroyHandle(void* handle)
     --fake::handles;
     return MV_OK;
 }
-int MV_CC_GetOptimalPacketSize(void*) { return 1500; }
-int MV_CC_SetIntValueEx(void*, const char*, int64_t) { return MV_OK; }
+int MV_CC_GetOptimalPacketSize(void* handle)
+{
+    if (static_cast<fake::Device*>(handle)->usb) ++fake::violations;
+    return 1500;
+}
+int MV_CC_SetIntValueEx(void* handle, const char*, int64_t)
+{
+    if (static_cast<fake::Device*>(handle)->usb) ++fake::violations;
+    return MV_OK;
+}
 int MV_CC_SetEnumValueByString(void*, const char*, const char*) { return MV_OK; }
 int MV_CC_GetFloatValue(void*, const char*, MVCC_FLOATVALUE* value)
 {
@@ -233,6 +258,25 @@ int main()
             fake::connected = false;
             requireThrow([&] { d.GrabImage(10); }, "Disconnected camera returned ordinary timeout");
             d.StopGrabbing(); d.StopGrabbing();
+        }
+        fake::reset();
+
+        // 只有一台 USB 相机时才启动混合采集。
+        {
+            auto usb = params();
+            usb.transport = CameraTransport::Usb;
+            usb.deviceIp.clear();
+            usb.netIp.clear();
+            requireThrow([&] { CameraInput bothUsb(usb, usb, 2, 10); }, "Two USB cameras configured");
+            CameraInput input(usb, params(true), 2, 10);
+            requireThrow([&] { input.StartCamera(); }, "Missing USB camera accepted");
+            fake::usbDeviceCount = 2;
+            requireThrow([&] { input.StartCamera(); }, "Ambiguous USB cameras accepted");
+            fake::usbDeviceCount = 1;
+            input.StartCamera();
+            const auto pair = waitPair(input);
+            require(pair && pair->left.camera_side == CameraSide::Left &&
+                    pair->right.camera_side == CameraSide::Right, "USB/GigE stereo capture failed");
         }
         fake::reset();
 

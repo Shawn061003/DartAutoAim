@@ -15,12 +15,10 @@ communication:
    write_timeout_ms: 100
 
 # 标定矩阵对应 image_width/image_height；缩放或裁剪后须调整内参。
-# 相机与网口 IP 已实机确认；标定时 OffsetX/OffsetY 均为 0，采集时保持一致。
+# 标定时 OffsetX/OffsetY 均为 0，采集时保持一致。
 cameras:
    left:
-      # MV-CS200-10GC
-      device_ip: "192.168.10.2" # 左相机设备 IP，已在 MVS 确认
-      net_ip: "192.168.10.25"  # 左相机对应的上位机网口 enp1s0
+      transport: "usb"       # 自动打开唯一的 MVS USB 相机
       exposure_us: 5000.      # 手动曝光时间，微秒
       gain: 0.                # 初始手动增益，启动时按设备支持范围校验
       extra_info_delay_s: 0.    # TODO: extra_info 延迟，秒
@@ -40,6 +38,7 @@ cameras:
 
    right:
       # MV-CS016-10GC
+      transport: "gige"
       device_ip: "192.168.20.2" # 右相机设备 IP，已在 MVS 确认
       net_ip: "192.168.20.25"  # 右相机对应的上位机网口 eno1
       exposure_us: 1000.      # 手动曝光时间，微秒

@@ -956,7 +956,7 @@ int Run(Options o) {
     LatestPair camera(config,o.pairMs);
     Require(fs::create_directories(o.output),"Output already exists / cannot create a new session directory");
     fs::create_directory(o.output/"left"); fs::create_directory(o.output/"right");
-    std::cout<<"Live stereo: left "<<config.leftCamera.deviceIp<<' '<<left.referenceSize<<"; right "<<config.rightCamera.deviceIp<<' '<<right.referenceSize
+    std::cout<<"Live stereo: left "<<config.leftCamera.deviceId()<<' '<<left.referenceSize<<"; right "<<config.rightCamera.deviceId()<<' '<<right.referenceSize
         <<"; pair receive-time limit="<<o.pairMs<<" ms\nK_left:\n"<<left.K<<"\nK_right:\n"<<right.K
         <<"\nIntrinsics: "<<(o.leftIntrinsics.empty()?"dart.yaml:cameras.left":o.leftIntrinsics.string())<<" | "
         <<(o.rightIntrinsics.empty()?"dart.yaml:cameras.right":o.rightIntrinsics.string())

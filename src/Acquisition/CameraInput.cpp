@@ -94,7 +94,8 @@ CameraDevice::CameraDevice(const CameraParams& params, CameraSide side)
 {
     if (side != CameraSide::Left && side != CameraSide::Right)
         throw std::invalid_argument("CameraDevice requires Left or Right side");
-    if (parseIp(params.deviceIp) == parseIp(params.netIp))
+    if (params.transport == CameraTransport::GigE &&
+        parseIp(params.deviceIp) == parseIp(params.netIp))
         throw std::invalid_argument("Camera device IP and host interface IP must differ");
     if (!std::isfinite(params.exposure) || params.exposure <= 0 || !std::isfinite(params.gain))
         throw std::invalid_argument("Camera exposure must be positive and gain must be finite");
@@ -109,25 +110,44 @@ void CameraDevice::FindCamera()
     acquireSdk();
     sdkInitialized_ = true;
 
-    // 按明确的设备和网口 IP 建立连接，避免使用枚举顺序判断左右相机。
-    MV_CC_DEVICE_INFO info{};
-    info.nTLayerType = MV_GIGE_DEVICE;
-    info.SpecialInfo.stGigEInfo.nCurrentIp = parseIp(params_.deviceIp);
-    info.SpecialInfo.stGigEInfo.nNetExport = parseIp(params_.netIp);
-    checkSdk(MV_CC_CreateHandle(&handle_, &info), "MV_CC_CreateHandle");
+    if (params_.transport == CameraTransport::Usb) {
+        // 枚举结果由 SDK 持有，创建句柄前避免其他线程重新枚举。
+        std::lock_guard<std::mutex> lock(sdkMutex);
+        MV_CC_DEVICE_INFO_LIST devices{};
+        checkSdk(MV_CC_EnumDevices(MV_USB_DEVICE, &devices), "MV_CC_EnumDevices (USB)");
+        const MV_CC_DEVICE_INFO* usbCamera = nullptr;
+        for (unsigned int index = 0; index < devices.nDeviceNum; ++index) {
+            const auto* device = devices.pDeviceInfo[index];
+            // MVS 的 USB 枚举也可能返回虚拟设备。
+            if (!device || device->nTLayerType != MV_USB_DEVICE) continue;
+            if (usbCamera) throw std::runtime_error("Multiple MVS USB cameras found; expected exactly one");
+            usbCamera = device;
+        }
+        if (!usbCamera) throw std::runtime_error("No MVS USB camera found");
+        checkSdk(MV_CC_CreateHandle(&handle_, usbCamera), "MV_CC_CreateHandle (USB)");
+    } else {
+        // 按明确的设备和网口 IP 建立连接。
+        MV_CC_DEVICE_INFO info{};
+        info.nTLayerType = MV_GIGE_DEVICE;
+        info.SpecialInfo.stGigEInfo.nCurrentIp = parseIp(params_.deviceIp);
+        info.SpecialInfo.stGigEInfo.nNetExport = parseIp(params_.netIp);
+        checkSdk(MV_CC_CreateHandle(&handle_, &info), "MV_CC_CreateHandle (GigE)");
+    }
     checkSdk(MV_CC_OpenDevice(handle_), "MV_CC_OpenDevice");
     opened_ = true;
 }
 
 void CameraDevice::SetCamera()
 {
-    // 1. 探测网口包长；探测失败时沿用设备包长，并输出诊断信息。
-    const int packetSize = MV_CC_GetOptimalPacketSize(handle_);
-    if (packetSize > 0)
-        checkSdk(MV_CC_SetIntValueEx(handle_, "GevSCPSPacketSize", packetSize), "GevSCPSPacketSize");
-    else
-        std::fprintf(stderr, "[CameraInput] packet size probe failed for %s (0x%x); keeping device value\n",
-                     params_.deviceIp.c_str(), static_cast<unsigned int>(packetSize));
+    // 1. 仅 GigE 需要探测网口包长；探测失败时沿用设备包长。
+    if (params_.transport == CameraTransport::GigE) {
+        const int packetSize = MV_CC_GetOptimalPacketSize(handle_);
+        if (packetSize > 0)
+            checkSdk(MV_CC_SetIntValueEx(handle_, "GevSCPSPacketSize", packetSize), "GevSCPSPacketSize");
+        else
+            std::fprintf(stderr, "[CameraInput] packet size probe failed for %s (0x%x); keeping device value\n",
+                         params_.deviceId(), static_cast<unsigned int>(packetSize));
+    }
 
     // 2. 使用连续采集和手动曝光、增益，避免相机自动调整覆盖 YAML 参数。
     checkSdk(MV_CC_SetEnumValueByString(handle_, "AcquisitionMode", "Continuous"), "AcquisitionMode");
@@ -140,8 +160,8 @@ void CameraDevice::SetCamera()
     // 3. 保持标定时的图像尺寸和原点；首版不自动改变硬件 ROI 或标定内参。
     if (getInt(handle_, "Width") != params_.width || getInt(handle_, "Height") != params_.height ||
         getInt(handle_, "OffsetX") != 0 || getInt(handle_, "OffsetY") != 0)
-        throw std::runtime_error("Camera dimensions/offset do not match full-image calibration: " +
-                                 params_.deviceIp);
+        throw std::runtime_error(std::string("Camera dimensions/offset do not match full-image calibration: ") +
+                                 params_.deviceId());
 
     // 4. 限制 SDK 缓存，并在支持时优先取最新帧以减小延迟。
     checkSdk(MV_CC_SetImageNodeNum(handle_, 2), "MV_CC_SetImageNodeNum");
@@ -150,7 +170,7 @@ void CameraDevice::SetCamera()
     // 只容忍明确的“不支持”，避免掩盖无效句柄、调用顺序等其他错误。
     if (static_cast<unsigned int>(strategyResult) == MV_E_SUPPORT)
         std::fprintf(stderr, "[CameraInput] latest-frame strategy unsupported for %s; keeping default OneByOne\n",
-                     params_.deviceIp.c_str());
+                     params_.deviceId());
     else
         checkSdk(strategyResult, "MV_CC_SetGrabStrategy");
     // extraInfoDelay 尚无对应的图像时钟补偿约定，采集端不使用它修改时间戳。
@@ -181,7 +201,7 @@ std::optional<CameraFrame> CameraDevice::GrabImage(std::uint32_t timeoutMs)
     const int result = MV_CC_GetImageBuffer(handle_, &raw, timeoutMs);
     if (static_cast<unsigned int>(result) == MV_E_NODATA) {
         if (!MV_CC_IsDeviceConnected(handle_))
-            throw std::runtime_error("Camera disconnected: " + params_.deviceIp);
+            throw std::runtime_error(std::string("Camera disconnected: ") + params_.deviceId());
         return std::nullopt;
     }
     checkSdk(result, "MV_CC_GetImageBuffer");
@@ -194,7 +214,8 @@ std::optional<CameraFrame> CameraDevice::GrabImage(std::uint32_t timeoutMs)
     if (raw.pBufAddr == nullptr || sourceBytes == 0 || info.nLostPacket != 0 ||
         width != static_cast<unsigned int>(params_.width) ||
         height != static_cast<unsigned int>(params_.height) || info.nOffsetX != 0 || info.nOffsetY != 0)
-        throw std::runtime_error("Invalid/incomplete frame or unexpected geometry: " + params_.deviceIp);
+        throw std::runtime_error(std::string("Invalid/incomplete frame or unexpected geometry: ") +
+                                 params_.deviceId());
 
     // 2. 输出内存由 cv::Mat 独立持有，转换完成后即可归还原始 SDK 缓存。
     const auto outputBytes = static_cast<std::uint64_t>(width) * height * 3;
@@ -263,9 +284,12 @@ CameraInput::CameraInput(const CameraParams& leftParams, const CameraParams& rig
 {
     if (grabTimeoutMs == 0 || grabTimeoutMs == std::numeric_limits<std::uint32_t>::max())
         throw std::invalid_argument("Camera grab timeout must be positive and finite");
-    if (parseIp(leftParams.deviceIp) == parseIp(rightParams.deviceIp) &&
+    if (leftParams.transport == CameraTransport::GigE && rightParams.transport == CameraTransport::GigE &&
+        parseIp(leftParams.deviceIp) == parseIp(rightParams.deviceIp) &&
         parseIp(leftParams.netIp) == parseIp(rightParams.netIp))
         throw std::invalid_argument("Left and right cameras must refer to different devices");
+    if (leftParams.transport == CameraTransport::Usb && rightParams.transport == CameraTransport::Usb)
+        throw std::invalid_argument("Only one USB camera can be configured");
 }
 
 CameraInput::~CameraInput() noexcept { StopCamera(); }

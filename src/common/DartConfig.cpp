@@ -89,8 +89,16 @@ CameraParams readCamera(const cv::FileNode& node, const std::string& name)
 {
     if (!node.isMap()) invalid(name, "missing camera section or expected a mapping");
     CameraParams camera;
-    camera.deviceIp = readString(node, "device_ip", name);
-    camera.netIp = readString(node, "net_ip", name);
+    const auto transport = node["transport"];
+    if (!transport.isNone()) {
+        const auto value = readNonEmptyString(transport, name + ".transport");
+        if (value == "usb") camera.transport = CameraTransport::Usb;
+        else if (value != "gige") invalid(name + ".transport", "expected gige or usb");
+    }
+    if (camera.transport == CameraTransport::GigE) {
+        camera.deviceIp = readString(node, "device_ip", name);
+        camera.netIp = readString(node, "net_ip", name);
+    }
     camera.exposure = static_cast<float>(readNumber(
         node, "exposure_us", name, std::numeric_limits<float>::max()));
     camera.gain = static_cast<float>(readNumber(

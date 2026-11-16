@@ -102,10 +102,12 @@ struct KalmanFilterParams {
     int stableFrames = 5; // 年龄、精度和残差条件连续满足的有效观测次数。
 };
 
+enum class CameraTransport { GigE, Usb };
+
 // 左右相机共用字段定义，各自保存一份参数；数值字段的初始值为待配置值。
 struct CameraParams {
-    std::string deviceIp;       // 相机设备 IP，启用相机前填写
-    std::string netIp;          // 本机网口 IP，启用相机前填写
+    std::string deviceIp;       // GigE 相机设备 IP
+    std::string netIp;          // GigE 本机网口 IP
     float exposure = 0.0F;      // 曝光时间（微秒）；0 表示待配置
     float gain = 0.0F;          // 增益；取值范围和单位按相机 SDK 约定，上机前确认
     int width = 0;              // 标定图像宽度（像素），对应 YAML 的 image_width
@@ -118,6 +120,11 @@ struct CameraParams {
     // k1/k2/k3 为径向系数，p1/p2 为切向系数，均为无量纲。
     cv::Mat distCoeffs;
     double extraInfoDelay = 0.0; // extra_info 延迟（秒），启用相机前确认
+    CameraTransport transport = CameraTransport::GigE;
+
+    const char* deviceId() const noexcept {
+        return transport == CameraTransport::Usb ? "USB" : deviceIp.c_str();
+    }
 };
 
 // 统一配置：加载并保存输入、相机、队列、通信、检测与计算参数。
@@ -137,7 +144,7 @@ public:
     using LeftCameraParams = CameraParams;
     using RightCameraParams = CameraParams;
 
-    LeftCameraParams leftCamera;    // YAML 节点 cameras.left；当前为 MV-CS200-10GC
+    LeftCameraParams leftCamera;    // YAML 节点 cameras.left
     RightCameraParams rightCamera;  // YAML 节点 cameras.right；当前为 MV-CS016-10GC
 
     // 构造时调用 load；成功返回后，两侧参数均已完成解析和格式校验。

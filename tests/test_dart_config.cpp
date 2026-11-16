@@ -60,6 +60,7 @@ int main(int argc, char** argv)
         auto camera = std::regex_replace(original, std::regex(R"rx(mode:\s*"[^"]*")rx"), "mode: \"camera\"");
         camera = std::regex_replace(camera, std::regex(R"rx(left_path:\s*"[^"]*")rx"), "left_path: \"\"");
         camera = std::regex_replace(camera, std::regex(R"rx(right_path:\s*"[^"]*")rx"), "right_path: \"\"");
+        camera = replace(camera, "transport: \"gige\"", "# 使用默认 GigE 连接");
         // 曝光负值用例使用固定夹具，避免依赖实际相机的曝光配置。
         camera = std::regex_replace(camera, std::regex(R"(exposure_us:\s*[^\r\n#]+)"), "exposure_us: 0. ");
         // 差分参数夹具独立于实际调参值。
@@ -70,6 +71,10 @@ int main(int argc, char** argv)
         write(camera);
         config.load(fixture.string());
         require(config.input.mode == InputMode::Camera, "Camera mode incorrect");
+        require(config.leftCamera.transport == CameraTransport::Usb && config.leftCamera.deviceIp.empty(),
+                "USB configuration should load without IP fields");
+        require(config.rightCamera.transport == CameraTransport::GigE && !config.rightCamera.deviceIp.empty(),
+                "Legacy camera configuration did not default to GigE");
         require(config.frameQueue.capacity == 4 && config.frameQueue.maxTimestampDiffMs == 5,
                 "Queue defaults changed");
         const auto root = source.parent_path().parent_path();
@@ -93,7 +98,8 @@ int main(int argc, char** argv)
         image = replace(image, "left_diff_lower: 0.", "left_diff_lower: 12.5");
         image = replace(image, "right_diff_upper: 255.", "right_diff_upper: 200.");
         image = replace(image, "left_diff_upper: 255.", "left_diff_upper: 180.");
-        image = std::regex_replace(image, std::regex(R"rx(port:\s*"[^"]*")rx"), "port: \"/dev/pts/config-test\"");
+        image = std::regex_replace(image, std::regex(R"rx((\n[ \t]*port:)[ \t]*"[^"]*")rx"),
+                                   "$1 \"/dev/pts/config-test\"");
         image = replace(image, "baud: 115200", "baud: 230400");
         image = replace(image, "status_max_age_ms: 200", "status_max_age_ms: 75");
         image = replace(image, "write_timeout_ms: 100", "write_timeout_ms: 40");
@@ -163,6 +169,7 @@ int main(int argc, char** argv)
             {"left_diff_lower:", "missing_left_diff_lower:"},
             {"exposure_us: 0.", "exposure_us: -1."},
             {"image_height: 3648", "image_height: 2.5"},
+            {"transport: \"usb\"", "transport: \"unknown\""},
             {"cameras:", "missing_cameras:"},
             {"device: \"CPU\"", "device: \"\""}
         };
