@@ -22,8 +22,8 @@ cameras:
       exposure_us: 5000.      # 手动曝光时间，微秒
       gain: 0.                # 初始手动增益，启动时按设备支持范围校验
       extra_info_delay_s: 0.    # TODO: extra_info 延迟，秒
-      image_width: 5472
-      image_height: 3648
+      image_width: 1440
+      image_height: 1080
       camera_matrix: !!opencv-matrix
          rows: 3
          cols: 3

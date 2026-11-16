@@ -16,7 +16,7 @@ cmake --build build --target calibration -j2
 ./build/calibration --calibration --side=right
 ```
 
-默认读取 `config/dart.yaml`。采集只打开 `--side` 指定的相机，读取其 IP、网口、曝光、增益和尺寸，不使用旧内参约束求解，也不受 `input.mode` 影响。
+默认读取 `config/dart.yaml`。采集按 `--side` 选择相机配置，并应用曝光、增益和尺寸。`transport: "usb"` 自动打开唯一的 MVS USB 相机，`transport: "gige"` 按设备 IP 和本机网口 IP 打开。采集入口由 `--collect` 选择，标定从采集图像求解新内参。
 离线模式不打开相机，也不需要读取相机配置；图片直接使用原始尺寸和坐标。
 镜头焦距、对焦、采集尺寸和硬件偏移应与实际使用一致。固定使用 **6×6 tag36h11 AprilGrid**：标记黑色外框边长 **88 mm**、间隙 **26.4 mm**（比例0.3）、两层黑边、ID **0～35**。正看板面，每行ID从右向左递增、各行从上向下递增；按ID升序且每个标记按解码方向四角输出，共144点。参数与实物固定一致，不再使用旧棋盘格规格。
 

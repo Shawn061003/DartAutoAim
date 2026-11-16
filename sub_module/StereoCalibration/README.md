@@ -35,7 +35,7 @@ GTK3 后端的滚轮反向、错误坐标和事件类型已作兼容处理；系
 ./build/stereo_calibration --collect --pair-ms=20 --interval=1
 ```
 
-- 从 `config/dart.yaml` 的相机节点读取 SDK 参数，默认配对时间容差同配置中的 `frame_queue.max_timestamp_diff_ms`。
+- 从 `config/dart.yaml` 的相机节点读取 SDK 参数。当前左侧自动打开唯一的 MVS USB 相机，右侧按设备 IP 和本机网口 IP 打开 GigE 相机。默认配对时间容差取 `frame_queue.max_timestamp_diff_ms`。
 - 一个窗口左右并排实时显示当前配对图像，右栏显示已保存数量、时间差和采集状态。
 - 不运行AprilGrid检测、不写视频。默认自动每秒保存一对 BMP；`--interval` 设置间隔，`A` 暂停/恢复，`Space` 请求保存下一对，`Esc/Q/Ctrl+C/关闭窗口` 退出。
 - 原生分辨率 BMP 在后台写盘，不在界面线程写图，不积压保存任务；写盘期间采集、配对和预览继续，只保留最近图对。
