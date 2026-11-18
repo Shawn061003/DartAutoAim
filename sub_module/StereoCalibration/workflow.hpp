@@ -223,14 +223,15 @@ inline void SaveAnnotations(const fs::path& path,const std::vector<Record>& reco
         f<<"{"<<"id"<<r.key<<"state"<<static_cast<int>(r.state)<<"left_file"<<r.sample.pair.leftPath.filename().string()
          <<"right_file"<<r.sample.pair.rightPath.filename().string()<<"left_stamp"<<FileStamp(r.sample.pair.leftPath)<<"right_stamp"<<FileStamp(r.sample.pair.rightPath)
          <<"left_roi"<<r.leftRoi<<"right_roi"<<r.rightRoi<<"left_points"<<r.sample.pair.left<<"right_points"<<r.sample.pair.right
+         <<"corner_ids"<<r.sample.pair.pointIds
          <<"right_reversed"<<static_cast<int>(r.sample.pair.rightReversed);
         aprilgrid::writeManualMarkers(f,"left_manual_markers",r.leftManualMarkers);
         aprilgrid::writeManualMarkers(f,"right_manual_markers",r.rightManualMarkers);f<<"}";
     }
     f<<"]";f.release();fs::rename(pending,path);
 }
-inline bool ValidCorners(const std::vector<cv::Point2f>& points,cv::Size size) {
-    if(points.size()!=aprilgrid::kPointCount) return false;
+inline bool ValidCorners(const std::vector<cv::Point2f>& points,cv::Size size,const std::vector<int>& ids={}) {
+    if(!aprilgrid::validIds(ids,points.size())) return false;
     return std::all_of(points.begin(),points.end(),[&](const cv::Point2f& p){return std::isfinite(p.x) && std::isfinite(p.y) && p.x>=0 && p.y>=0 && p.x<size.width && p.y<size.height;});
 }
 inline void LoadAnnotations(const fs::path& path,std::vector<Record>& records,cv::Size left,cv::Size right) {
@@ -250,13 +251,16 @@ inline void LoadAnnotations(const fs::path& path,std::vector<Record>& records,cv
         cv::Rect lr,rr;n["left_roi"]>>lr;n["right_roi"]>>rr;
         if((lr&cv::Rect({},left))!=lr || (rr&cv::Rect({},right))!=rr) continue;
         std::vector<cv::Point2f> lp,rp;n["left_points"]>>lp;n["right_points"]>>rp;
-        if((!lp.empty() && !ValidCorners(lp,left)) || (!rp.empty() && !ValidCorners(rp,right))) continue;
+        std::vector<int> ids;if(!n["corner_ids"].empty()) n["corner_ids"]>>ids;
+        if((!lp.empty() && !ValidCorners(lp,left,ids)) || (!rp.empty() && !ValidCorners(rp,right,ids))) continue;
         const int state=static_cast<int>(n["state"]);
-        if(state<0 || state>2 || (state==static_cast<int>(Record::State::Accepted) && (!ValidCorners(lp,left) || !ValidCorners(rp,right)))) continue;
+        if(state<0 || state>2 || (state==static_cast<int>(Record::State::Accepted) &&
+           (lp.size()!=rp.size() || !ValidCorners(lp,left,ids) || !ValidCorners(rp,right,ids)))) continue;
         r.leftRoi=lr;r.rightRoi=rr;r.sample.pair.left=std::move(lp);r.sample.pair.right=std::move(rp);
         r.sample.pair.rightReversed=static_cast<int>(n["right_reversed"])!=0;r.state=static_cast<Record::State>(state);
-        if(r.sample.pair.left.empty()) r.leftManualMarkers=aprilgrid::readManualMarkers(n["left_manual_markers"],left);
-        if(r.sample.pair.right.empty()) r.rightManualMarkers=aprilgrid::readManualMarkers(n["right_manual_markers"],right);
+        r.sample.pair.pointIds=std::move(ids);
+        r.leftManualMarkers=aprilgrid::readManualMarkers(n["left_manual_markers"],left);
+        r.rightManualMarkers=aprilgrid::readManualMarkers(n["right_manual_markers"],right);
     }
 }
 inline std::vector<LivePair> Selected(const std::vector<Record>& records) {
@@ -290,17 +294,18 @@ struct Viewport {
 inline bool DetectRoi(const cv::Mat& raw,cv::Rect roi,std::vector<cv::Point2f>& points,aprilgrid::DetectionInfo* info=nullptr) {
     points.clear();if(info) *info={};
     if(raw.empty() || roi.width<24 || roi.height<24 || (roi&cv::Rect({},raw.size()))!=roi) return false;
-    // ROI内多尺度检测，在原生ROI精修后恢复全图坐标；部分标记只供界面提示。
-    const bool found=aprilgrid::detect(raw(roi),points,info);
+    aprilgrid::DetectionInfo detected;
+    const bool found=aprilgrid::detect(raw(roi),points,&detected,true);
     const cv::Point2f offset(static_cast<float>(roi.x),static_cast<float>(roi.y));
-    if(info) info->translate(offset);
+    detected.translate(offset);if(info) *info=detected;
     if(!found) return false;
     for(auto& p:points) p+=offset;
-    if(!ValidCorners(points,raw.size())) {points.clear();return false;}return true;
+    if(!ValidCorners(points,raw.size(),aprilgrid::pointIds(detected))) {points.clear();return false;}return true;
 }
 struct Detection {
     std::size_t index=0;std::uint64_t epoch=0;
     std::vector<cv::Point2f> left,right;
+    std::vector<int> pointIds;
     aprilgrid::DetectionInfo leftMarkers,rightMarkers;
     bool leftFound=false,rightFound=false,reversed=false;
     double milliseconds=0;
@@ -308,7 +313,9 @@ struct Detection {
 inline Detection DetectPair(cv::Mat left,cv::Mat right,cv::Rect lr,cv::Rect rr,std::size_t index,std::uint64_t epoch) {
     const auto started=Clock::now();Detection result;result.index=index;result.epoch=epoch;
     result.leftFound=DetectRoi(left,lr,result.left,&result.leftMarkers);result.rightFound=DetectRoi(right,rr,result.right,&result.rightMarkers);
-    if(result.leftFound && result.rightFound) result.reversed=AlignRight(result.left,result.right);
+    aprilgrid::correspond(result.leftMarkers,result.rightMarkers,result.left,result.right,result.pointIds);
+    result.leftFound=ValidCorners(result.left,left.size(),result.pointIds);
+    result.rightFound=ValidCorners(result.right,right.size(),result.pointIds);
     result.milliseconds=std::chrono::duration<double,std::milli>(Clock::now()-started).count();return result;
 }
 } // namespace stereo_workflow

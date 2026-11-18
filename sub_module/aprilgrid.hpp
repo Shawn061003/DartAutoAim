@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cmath>
 #include <string>
+#include <stdexcept>
 #include <vector>
 
 // 实物板：6x6 tag36h11，黑色外框88mm，间隙26.4mm，黑边宽2个编码单元。
@@ -13,6 +14,7 @@
 // 板坐标原点在整块标记阵列左上角，X向右、Y向下，Z=0。
 namespace aprilgrid {
 constexpr int kColumns=6, kRows=6, kTags=36, kPointCount=4*kTags, kBorderBits=2;
+constexpr int kMinCalibrationTags=25;
 constexpr float kTagMm=88.F, kGapMm=26.4F;
 
 inline cv::Ptr<cv::aruco::Dictionary> dictionary() {
@@ -57,14 +59,66 @@ inline std::string idText(const std::vector<int>& ids,std::size_t first=0,std::s
     return result;
 }
 
-inline DetectionInfo fromPoints(const std::vector<cv::Point2f>& points) {
+// 每个角点以 4*tag_id+corner 编号，旧的完整观测可省略编号。
+inline std::vector<int> pointIds(const DetectionInfo& info) {
+    std::vector<int> ids;
+    if(!info.duplicates.empty()) return ids;
+    for(int id:info.ids) for(int corner=0;corner<4;++corner) ids.push_back(4*id+corner);
+    return ids;
+}
+inline std::vector<cv::Point3f> objectPoints(const std::vector<int>& ids,std::size_t count) {
+    const auto board=objectPoints();
+    if(ids.empty() && count==board.size()) return board;
+    if(ids.size()!=count || count<4*kMinCalibrationTags || count%4!=0)
+        throw std::runtime_error("AprilGrid calibration requires at least 25 unique tag IDs and matching corner IDs");
+    std::vector<cv::Point3f> points;
+    int previous=-1;
+    for(std::size_t i=0;i<ids.size();++i) {
+        const int id=ids[i];
+        if(id<=previous || id>=kPointCount || id<0 || id%4!=static_cast<int>(i%4) ||
+           id!=ids[i-i%4]+static_cast<int>(i%4))
+            throw std::runtime_error("Invalid AprilGrid corner IDs");
+        previous=id;points.push_back(board[id]);
+    }
+    return points;
+}
+inline bool validIds(const std::vector<int>& ids,std::size_t count) {
+    try {objectPoints(ids,count);return true;} catch(const std::runtime_error&) {return false;}
+}
+inline DetectionInfo fromPoints(const std::vector<cv::Point2f>& points,const std::vector<int>& ids={}) {
     DetectionInfo result;
-    if(points.size()!=kPointCount) return result;
-    for(int id=0;id<kTags;++id) {
-        result.ids.push_back(id);
-        result.corners.emplace_back(points.begin()+4*id,points.begin()+4*id+4);
+    if(!validIds(ids,points.size())) return result;
+    for(std::size_t i=0;i<points.size();i+=4) {
+        result.ids.push_back(ids.empty()?static_cast<int>(i/4):ids[i]/4);
+        result.corners.emplace_back(points.begin()+i,points.begin()+i+4);
     }
     return result;
+}
+
+inline std::vector<cv::Point2f> visiblePoints(const DetectionInfo& info) {
+    if(!info.duplicates.empty() || info.ids.size()!=info.corners.size() ||
+       !validIds(pointIds(info),4*info.ids.size())) return {};
+    std::vector<cv::Point2f> points;
+    for(const auto& marker:info.corners) {
+        if(marker.size()!=4) return {};
+        points.insert(points.end(),marker.begin(),marker.end());
+    }
+    return points;
+}
+
+inline void correspond(const DetectionInfo& left,const DetectionInfo& right,
+    std::vector<cv::Point2f>& lp,std::vector<cv::Point2f>& rp,std::vector<int>& ids) {
+    lp.clear();rp.clear();ids.clear();
+    if(visiblePoints(left).empty() || visiblePoints(right).empty()) return;
+    for(std::size_t i=0;i<left.ids.size();++i) {
+        const auto found=std::find(right.ids.begin(),right.ids.end(),left.ids[i]);
+        if(found==right.ids.end()) continue;
+        const auto j=static_cast<std::size_t>(found-right.ids.begin());
+        lp.insert(lp.end(),left.corners[i].begin(),left.corners[i].end());
+        rp.insert(rp.end(),right.corners[j].begin(),right.corners[j].end());
+        for(int corner=0;corner<4;++corner) ids.push_back(4*left.ids[i]+corner);
+    }
+    if(!validIds(ids,lp.size())) {lp.clear();rp.clear();ids.clear();}
 }
 
 inline std::vector<cv::Point2f> fullPoints(const DetectionInfo& info) {
@@ -77,7 +131,7 @@ inline std::vector<cv::Point2f> fullPoints(const DetectionInfo& info) {
     return points;
 }
 
-// 完整观测沿用原有points字段；只额外保存手动修过的部分标记，兼容旧标注。
+// 保存检出的标记身份和原生角点，供恢复显示与手动精修使用。
 inline void writeManualMarkers(cv::FileStorage& file,const std::string& key,const DetectionInfo& info) {
     if(info.ids.empty()) return;
     file<<key<<"{"<<"ids"<<info.ids<<"duplicates"<<info.duplicates<<"corners"<<"[";
@@ -103,8 +157,8 @@ inline DetectionInfo readManualMarkers(const cv::FileNode& node,cv::Size size) {
 }
 
 // 多尺度只提供检测初值；每次均回原生灰度图精修，不将插值像素作为标定观测。
-// 部分结果仅供显示，仍须36个ID唯一完整时才返回可标定的144个角点。
-inline bool detect(const cv::Mat& image,std::vector<cv::Point2f>& points,DetectionInfo* info=nullptr) {
+// allowPartial 允许至少25个唯一ID；默认完整检测供旧实时入口使用。
+inline bool detect(const cv::Mat& image,std::vector<cv::Point2f>& points,DetectionInfo* info=nullptr,bool allowPartial=false) {
     points.clear();
     if(info) *info={};
     if(image.empty()) return false;
@@ -164,6 +218,7 @@ inline bool detect(const cv::Mat& image,std::vector<cv::Point2f>& points,Detecti
     }
     best.attempts=attempts;
     if(info) *info=best;
+    if(allowPartial) {points=visiblePoints(best);return !points.empty();}
     if(!best.complete()) return false;
     points.reserve(kPointCount);
     for(const auto& marker:best.corners) points.insert(points.end(),marker.begin(),marker.end());

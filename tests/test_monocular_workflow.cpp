@@ -41,7 +41,7 @@ int main() {
         cv::Mat incomplete=original.clone();
         incomplete(cv::Rect(ox+5*(cell+cvRound(.3*cell)),oy,cell,cell)).setTo(cv::Scalar(220,220,220));
         aprilgrid::DetectionInfo markers;
-        check(!detectRoi(incomplete,roi,o.board,points,&markers) && points.empty(),"Missing ID accepted as a full board");
+        check(detectRoi(incomplete,roi,o.board,points,&markers) && points.size()==140,"Partial board not accepted");
         check(markers.ids.size()==35 && markers.missing()==std::vector<int>{0} && markers.attempts>1 && markers.duplicates.empty(),
               "Partial detection lost visible/missing IDs or skipped scale retries");
         for(std::size_t i=0;i<markers.ids.size();++i) for(int j=0;j<4;++j)
@@ -127,17 +127,18 @@ int main() {
         app.key(' ');auto resumed=readDataset(o);loadAnnotations(o,resumed);
         check(resumed.records[0].state==MonoRecord::State::Accepted && cv::norm(resumed.records[0].roi.tl()-roi.tl())<=3 && cv::norm(resumed.records[0].roi.br()-roi.br())<=3,"Annotations did not resume");
         app.finish();
-        // Partial edits survive a reload but cannot become calibration observations.
+        // Partial edits retain their IDs and can participate in calibration.
         Options partial=o;partial.input=root/"Partial";partial.output=root/"PartialResult";fs::create_directories(partial.input);
         check(cv::imwrite((partial.input/"000001.bmp").string(),incomplete),"Cannot write partial edit fixture");
         MonoReview partialApp(partial);partialApp.setRoi(roi);waitDetector(partialApp);partialApp.key('e');
         const cv::Point partialHit=partialApp.viewport().project(expected[20]),partialDrop=partialHit+cv::Point(2,2);
         partialApp.mouse(cv::EVENT_LBUTTONDOWN,partialHit.x,partialHit.y,0);partialApp.mouse(cv::EVENT_LBUTTONUP,partialDrop.x,partialDrop.y,0);
         const auto& partialRecord=partialApp.dataset().records[0];
-        check(partialRecord.manualMarkers.ids.size()==35 && partialRecord.manualMarkers.missing()==std::vector<int>{0} && partialRecord.sample.points.empty(),
-              "Partial edit lost marker IDs or created full observations");
+        check(partialRecord.manualMarkers.ids.size()==35 && partialRecord.manualMarkers.missing()==std::vector<int>{0} &&
+              partialRecord.sample.points.size()==140 && partialRecord.sample.pointIds.front()==4,
+              "Partial edit lost marker identity");
         const auto manual=partialRecord.manualMarkers;partialApp.key(' ');
-        check(selected(partialApp.dataset().records).empty(),"Partial manual edit bypassed complete-board gate");partialApp.finish();
+        check(selected(partialApp.dataset().records).size()==1,"Partial manual edit could not be accepted");partialApp.finish();
         partial.output=root/"PartialReload";MonoReview partialReload(partial);partialReload.update();
         check(!partialReload.detectorBusy() && partialReload.dataset().records[0].manualMarkers.corners==manual.corners,
               "Reload discarded or redetected manual partial corners");partialReload.finish();

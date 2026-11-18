@@ -140,7 +140,7 @@ class Review {
     int listOffset_=0,drag_=-1,pan_=-1;cv::Point2d start_,cursor_,lastPan_,rightStart_;
     bool rightMoved_=false;int activeSide_=0;calibration_ui::PointerInput pointer_;
     calibration_ui::CornerEditor editor_;
-    std::string status_="分别框选左右图片中的完整标定板，并保留白色边缘";
+    std::string status_="分别框选左右可见的 AprilGrid 标记，并保留白色边缘";
     int count(Record::State state) const {return static_cast<int>(std::count_if(dataset_.records.begin(),dataset_.records.end(),[&](const Record& r){return r.state==state;}));}
     Record& current(){return dataset_.records[index_];}
     const Record& current() const {return dataset_.records[index_];}
@@ -149,11 +149,13 @@ class Review {
     aprilgrid::DetectionInfo& markers(int side) {return side==0?detected_.leftMarkers:detected_.rightMarkers;}
     void commitCorners() {
         auto& r=current();const bool included=r.state==Record::State::Accepted;
-        detected_.left=aprilgrid::fullPoints(detected_.leftMarkers);detected_.right=aprilgrid::fullPoints(detected_.rightMarkers);
-        detected_.leftFound=ValidCorners(detected_.left,left_.referenceSize);detected_.rightFound=ValidCorners(detected_.right,right_.referenceSize);
+        aprilgrid::correspond(detected_.leftMarkers,detected_.rightMarkers,detected_.left,detected_.right,detected_.pointIds);
+        detected_.leftFound=ValidCorners(detected_.left,left_.referenceSize,detected_.pointIds);
+        detected_.rightFound=ValidCorners(detected_.right,right_.referenceSize,detected_.pointIds);
         detected_.reversed=false;r.sample.pair.left=detected_.left;r.sample.pair.right=detected_.right;r.sample.pair.rightReversed=false;
-        r.leftManualMarkers=detected_.leftFound?aprilgrid::DetectionInfo{}:detected_.leftMarkers;
-        r.rightManualMarkers=detected_.rightFound?aprilgrid::DetectionInfo{}:detected_.rightMarkers;
+        r.sample.pair.pointIds=detected_.pointIds;
+        r.leftManualMarkers=detected_.leftMarkers;
+        r.rightManualMarkers=detected_.rightMarkers;
         r.state=Record::State::Pending;++epoch_;
         if(included) changed();else persist();
         status_="角点已保存；核对两侧后按空格重新接受。Z 撤销上次调整，E 退出精修";
@@ -161,6 +163,7 @@ class Review {
     void invalidateCurrent() {
         auto& r=current();const bool included=r.state==Record::State::Accepted;
         r.state=Record::State::Pending;r.sample.pair.left.clear();r.sample.pair.right.clear();
+        r.sample.pair.pointIds.clear();
         r.leftManualMarkers={};r.rightManualMarkers={};editor_.reset();
         if(included) changed();
         detected_={};++epoch_;needDetection_=!rawLeft_.empty() && !rawRight_.empty();persist();
@@ -179,11 +182,19 @@ class Review {
             Require(rawLeft_.size()==left_.referenceSize && rawRight_.size()==right_.referenceSize,"图片尺寸与本组原生尺寸不一致，请跳过");
             views_[0].reset(rawLeft_.size());views_[1].reset(rawRight_.size());
             detected_.left=r.sample.pair.left;detected_.right=r.sample.pair.right;detected_.reversed=r.sample.pair.rightReversed;
-            detected_.leftFound=ValidCorners(detected_.left,rawLeft_.size());detected_.rightFound=ValidCorners(detected_.right,rawRight_.size());
-            if(detected_.leftFound) detected_.leftMarkers=aprilgrid::fromPoints(detected_.left);
-            else detected_.leftMarkers=r.leftManualMarkers;
-            if(detected_.rightFound) detected_.rightMarkers=aprilgrid::fromPoints(detected_.right);
-            else detected_.rightMarkers=r.rightManualMarkers;
+            detected_.pointIds=r.sample.pair.pointIds;
+            detected_.leftFound=ValidCorners(detected_.left,rawLeft_.size(),detected_.pointIds);
+            detected_.rightFound=ValidCorners(detected_.right,rawRight_.size(),detected_.pointIds);
+            detected_.leftMarkers=r.leftManualMarkers.ids.empty()?aprilgrid::fromPoints(detected_.left,detected_.pointIds):r.leftManualMarkers;
+            detected_.rightMarkers=r.rightManualMarkers.ids.empty()?aprilgrid::fromPoints(detected_.right,detected_.pointIds):r.rightManualMarkers;
+            if(r.state!=Record::State::Accepted) {
+                aprilgrid::correspond(detected_.leftMarkers,detected_.rightMarkers,detected_.left,detected_.right,detected_.pointIds);
+                detected_.leftFound=ValidCorners(detected_.left,rawLeft_.size(),detected_.pointIds);
+                detected_.rightFound=ValidCorners(detected_.right,rawRight_.size(),detected_.pointIds);
+                current().sample.pair.left=detected_.left;current().sample.pair.right=detected_.right;
+                current().sample.pair.pointIds=detected_.pointIds;
+                current().leftManualMarkers=detected_.leftMarkers;current().rightManualMarkers=detected_.rightMarkers;
+            }
             needDetection_=r.state!=Record::State::Accepted &&
                 ((!r.leftRoi.empty() && !detected_.leftFound && detected_.leftMarkers.ids.empty()) ||
                  (!r.rightRoi.empty() && !detected_.rightFound && detected_.rightMarkers.ids.empty()));
@@ -250,7 +261,10 @@ public:
                 auto result=detection_.get();
                 if(result.index==index_ && result.epoch==epoch_) {
                     detected_=std::move(result);auto& r=current();r.sample.pair.left=detected_.left;r.sample.pair.right=detected_.right;r.sample.pair.rightReversed=detected_.reversed;
-                    status_=detected_.leftFound && detected_.rightFound?"两侧均已找到36个AprilTag，已按ID对应；空格接受":"一侧 ROI 内未找到完整AprilGrid；请框全AprilGrid并保留白边，或按 N 跳过";persist();
+                    r.sample.pair.pointIds=detected_.pointIds;r.leftManualMarkers=detected_.leftMarkers;r.rightManualMarkers=detected_.rightMarkers;
+                    status_=detected_.leftFound && detected_.rightFound?
+                        "共同检出 "+std::to_string(detected_.pointIds.size()/4)+" 个标记；核对后按空格接受":
+                        "两侧需要至少 25 个共同且唯一的 ID；请调整 ROI 或跳过";persist();
                 }
             }catch(const std::exception& e){status_=std::string("ROI 检测失败：")+e.what();}
         }
@@ -285,7 +299,7 @@ public:
         if(key=='d') {if(r.state==Record::State::Accepted) {r.state=Record::State::Pending;changed();status_="已移出当前图片组，保留标注";}return;}
         if(key=='r') {r.leftRoi={};r.rightRoi={};invalidateCurrent();needDetection_=false;status_="两侧 ROI 已清除，请重新框选";return;}
         if(key==' ') {
-            if(detection_.valid() || needDetection_ || !detected_.leftFound || !detected_.rightFound || r.leftRoi.empty() || r.rightRoi.empty()) {status_="两侧 ROI 均须检测到完整的144个AprilTag角点才能接受";return;}
+            if(detection_.valid() || needDetection_ || !detected_.leftFound || !detected_.rightFound || r.leftRoi.empty() || r.rightRoi.empty()) {status_="两侧需要至少 25 个共同且唯一的 ID 才能接受";return;}
             if(r.state!=Record::State::Accepted) {
                 if(count(Record::State::Accepted)>=settings_.maxPairs) {status_="已达图片组数上限，请先移除已纳入的一组";return;}
                 r.state=Record::State::Accepted;undo_.push_back(index_);changed();
@@ -336,7 +350,7 @@ public:
         }
         if(event==cv::EVENT_LBUTTONUP && drag_>=0) {
             const int chosen=drag_;drag_=-1;const auto roi=views_[chosen].roi(start_,point);
-            if(roi.width<24 || roi.height<24) {status_="ROI 太小，请放大后框选完整AprilGrid";return;}
+            if(roi.width<24 || roi.height<24) {status_="ROI 太小，请放大后框选可见的 AprilGrid 标记";return;}
             if(chosen==0) current().leftRoi=roi;else current().rightRoi=roi;
             invalidateCurrent();status_="正在后台检测所选 ROI 内的原始分辨率角点";
         }

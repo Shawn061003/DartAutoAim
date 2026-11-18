@@ -11,8 +11,8 @@ constexpr const char* reviewWindow="单目标定 - 离线 ROI";
 inline std::string fileStamp(const fs::path& p) {
     return std::to_string(fs::file_size(p))+":"+std::to_string(fs::last_write_time(p).time_since_epoch().count());
 }
-inline bool validPoints(const std::vector<cv::Point2f>& points,cv::Size size,cv::Size board) {
-    return points.size()==static_cast<std::size_t>(4*board.area()) && std::all_of(points.begin(),points.end(),[&](const cv::Point2f& p) {
+inline bool validPoints(const std::vector<cv::Point2f>& points,cv::Size size,cv::Size board,const std::vector<int>& ids={}) {
+    return board==cv::Size(aprilgrid::kColumns,aprilgrid::kRows) && aprilgrid::validIds(ids,points.size()) && std::all_of(points.begin(),points.end(),[&](const cv::Point2f& p) {
         return std::isfinite(p.x) && std::isfinite(p.y) && p.x>=0 && p.y>=0 && p.x<size.width && p.y<size.height;
     });
 }
@@ -59,7 +59,7 @@ inline void saveAnnotations(const Options& o,const MonoDataset& data) {
     f<<"schema_version"<<2<<"camera_side"<<o.side<<"columns"<<o.board.width<<"rows"<<o.board.height
      <<"image_width"<<data.size.width<<"image_height"<<data.size.height<<"records"<<"[";
     for(const auto& r:data.records) {
-        f<<"{"<<"file"<<r.sample.image<<"stamp"<<fileStamp(r.path)<<"state"<<static_cast<int>(r.state)<<"roi"<<r.roi<<"points"<<r.sample.points;
+        f<<"{"<<"file"<<r.sample.image<<"stamp"<<fileStamp(r.path)<<"state"<<static_cast<int>(r.state)<<"roi"<<r.roi<<"points"<<r.sample.points<<"corner_ids"<<r.sample.pointIds;
         aprilgrid::writeManualMarkers(f,"manual_markers",r.manualMarkers);f<<"}";
     }
     f<<"]";f.release();fs::rename(pending,o.input/"annotations.yaml");
@@ -75,11 +75,13 @@ inline void loadAnnotations(const Options& o,MonoDataset& data) {
         const auto it=files.find(static_cast<std::string>(n["file"]));if(it==files.end()) continue;
         auto& r=*it->second;if(static_cast<std::string>(n["stamp"])!=fileStamp(r.path)) {std::cerr<<"Ignoring stale annotation: "<<r.path<<'\n';continue;}
         cv::Rect roi;std::vector<cv::Point2f> points;n["roi"]>>roi;n["points"]>>points;
+        std::vector<int> ids;if(!n["corner_ids"].empty()) n["corner_ids"]>>ids;
         const int state=static_cast<int>(n["state"]);
-        if(state<0 || state>2 || (roi&cv::Rect({},data.size))!=roi || (!points.empty() && !validPoints(points,data.size,o.board))) continue;
-        if(state==1 && (roi.empty() || !validPoints(points,data.size,o.board))) continue;
+        if(state<0 || state>2 || (roi&cv::Rect({},data.size))!=roi || (!points.empty() && !validPoints(points,data.size,o.board,ids))) continue;
+        if(state==1 && (roi.empty() || !validPoints(points,data.size,o.board,ids))) continue;
         r.roi=roi;r.sample.points=std::move(points);r.state=static_cast<MonoRecord::State>(state);
-        if(r.sample.points.empty()) r.manualMarkers=aprilgrid::readManualMarkers(n["manual_markers"],data.size);
+        r.sample.pointIds=std::move(ids);
+        r.manualMarkers=aprilgrid::readManualMarkers(n["manual_markers"],data.size);
     }
 }
 
@@ -180,12 +182,13 @@ inline bool detectRoi(const cv::Mat& image,cv::Rect roi,cv::Size board,std::vect
     points.clear();if(info) *info={};
     if(image.empty() || roi.width<24 || roi.height<24 || (roi&cv::Rect({},image.size()))!=roi ||
        board!=cv::Size(aprilgrid::kColumns,aprilgrid::kRows)) return false;
-    const bool found=aprilgrid::detect(image(roi),points,info);
+    aprilgrid::DetectionInfo detected;
+    const bool found=aprilgrid::detect(image(roi),points,&detected,true);
     const cv::Point2f offset(static_cast<float>(roi.x),static_cast<float>(roi.y));
-    if(info) info->translate(offset);
+    detected.translate(offset);if(info) *info=detected;
     if(!found) return false;
     for(auto& p:points) p+=offset;
-    if(!validPoints(points,image.size(),board)) {points.clear();return false;}return true;
+    if(!validPoints(points,image.size(),board,aprilgrid::pointIds(detected))) {points.clear();return false;}return true;
 }
 struct MonoDetection {std::size_t index=0;std::uint64_t epoch=0;std::vector<cv::Point2f> points;aprilgrid::DetectionInfo markers;double ms=0;bool found=false;};
 struct MonoButton {cv::Rect box;const char* caption;int key;};
@@ -209,16 +212,17 @@ class MonoReview {
     std::vector<std::size_t> undo_;int listOffset_=0;bool drag_=false,pan_=false,rightMoved_=false;cv::Point2d start_,cursor_,lastPan_,rightStart_;
     calibration_ui::PointerInput pointer_;
     calibration_ui::CornerEditor editor_;
-    std::string status_="框选完整标定板，并保留白色边缘";
+    std::string status_="框选可见的 AprilGrid 标记；至少检出 25 个 ID";
     MonoRecord& current() {return data_.records[index_];}
     const MonoRecord& current() const {return data_.records[index_];}
     void persist() const {saveAnnotations(o_,data_);}
     void changed() {++revision_;solved_={};needFit_=true;persist();}
     void commitCorners() {
         auto& r=current();const bool included=r.state==MonoRecord::State::Accepted;
-        detected_.points=aprilgrid::fullPoints(detected_.markers);
-        detected_.found=validPoints(detected_.points,data_.size,o_.board);
-        r.sample.points=detected_.points;r.manualMarkers=detected_.found?aprilgrid::DetectionInfo{}:detected_.markers;
+        detected_.points=aprilgrid::visiblePoints(detected_.markers);
+        r.sample.pointIds=aprilgrid::pointIds(detected_.markers);
+        detected_.found=validPoints(detected_.points,data_.size,o_.board,r.sample.pointIds);
+        r.sample.points=detected_.points;r.manualMarkers=detected_.markers;
         r.state=MonoRecord::State::Pending;++epoch_;
         if(included) changed();else persist();
         status_="角点已保存；核对后按空格重新接受。Z 撤销上次调整，E 退出精修";
@@ -227,9 +231,15 @@ class MonoReview {
         index_=std::min(index,data_.records.size()-1);++epoch_;detected_={};needDetection_=false;drag_=pan_=false;editor_.reset();
         raw_=cv::imread(current().path.string(),cv::IMREAD_COLOR|cv::IMREAD_IGNORE_ORIENTATION);
         if(raw_.empty() || raw_.size()!=data_.size) {raw_.release();view_.reset({});status_="图片无法读取或原始尺寸不一致，按 N 跳过";return;}
-        view_.reset(raw_.size());detected_.points=current().sample.points;detected_.found=validPoints(detected_.points,data_.size,o_.board);
-        if(detected_.found) detected_.markers=aprilgrid::fromPoints(detected_.points);
-        else detected_.markers=current().manualMarkers;
+        view_.reset(raw_.size());detected_.points=current().sample.points;detected_.found=validPoints(detected_.points,data_.size,o_.board,current().sample.pointIds);
+        detected_.markers=current().manualMarkers.ids.empty()?aprilgrid::fromPoints(detected_.points,current().sample.pointIds):current().manualMarkers;
+        // 旧版部分标记仅保存了 manual_markers，恢复时按 ID 升级为可求解观测。
+        if(!detected_.found && current().state!=MonoRecord::State::Accepted) {
+            detected_.points=aprilgrid::visiblePoints(detected_.markers);
+            current().sample.pointIds=aprilgrid::pointIds(detected_.markers);
+            detected_.found=validPoints(detected_.points,data_.size,o_.board,current().sample.pointIds);
+            current().sample.points=detected_.points;
+        }
         needDetection_=current().state!=MonoRecord::State::Accepted && !current().roi.empty() && !detected_.found && detected_.markers.ids.empty();
         status_=current().state==MonoRecord::State::Accepted?"已纳入标定；重新框选后需再次接受":"框选 ROI 并检查角点；空格接受，N 跳过";
     }
@@ -282,8 +292,9 @@ public:
             try {
                 auto result=detection_.get();
                 if(result.index==index_ && result.epoch==epoch_) {
-                    detected_=std::move(result);current().sample.points=detected_.points;persist();
-                    status_=detected_.found?"已找到完整AprilGrid（36个标记）；检查角点位置后按空格接受":"ROI 内未找到完整AprilGrid（36个标记）；请框全角点并保留白边，或按 N 跳过";
+                    detected_=std::move(result);current().sample.points=detected_.points;
+                    current().sample.pointIds=aprilgrid::pointIds(detected_.markers);current().manualMarkers=detected_.markers;persist();
+                    status_=detected_.found?"检出 "+std::to_string(detected_.markers.ids.size())+" 个 ID；核对后按空格接受":"需要至少 25 个唯一 ID；请调整 ROI 或跳过";
                 }
             }catch(const std::exception& e){status_=std::string("ROI 检测失败：")+e.what();}
         }
@@ -314,7 +325,7 @@ public:
         if(key=='d') {if(r.state==MonoRecord::State::Accepted) {r.state=MonoRecord::State::Pending;changed();status_="已移出标定，保留 ROI 和角点";}return;}
         if(key=='r') {setRoi({});status_="已清除 ROI，请重新框选";return;}
         if(key==' ') {
-            if(raw_.empty() || detectorBusy() || !detected_.found || r.roi.empty()) {status_="当前 ROI 必须检测到完整AprilGrid（36个标记）才能接受";return;}
+            if(raw_.empty() || detectorBusy() || !detected_.found || r.roi.empty()) {status_="当前 ROI 至少需要 25 个唯一 ID 才能接受";return;}
             if(r.state!=MonoRecord::State::Accepted) {
                 if(selected(data_.records).size()>=static_cast<std::size_t>(o_.maxViews)) {status_="已达图片数量上限，请移除一张或增大 --max-views";return;}
                 r.state=MonoRecord::State::Accepted;undo_.push_back(index_);changed();
@@ -325,6 +336,7 @@ public:
     void setRoi(cv::Rect roi) {
         ensure((roi&cv::Rect({},data_.size))==roi,"ROI outside native image");
         auto& r=current();const bool included=r.state==MonoRecord::State::Accepted;r.state=MonoRecord::State::Pending;r.roi=roi;r.sample.points.clear();
+        r.sample.pointIds.clear();
         detected_={};r.manualMarkers={};editor_.reset();++epoch_;needDetection_=!raw_.empty() && !roi.empty();
         if(included) changed();else persist();
     }
@@ -374,7 +386,7 @@ public:
         }
         if(event==cv::EVENT_LBUTTONUP && drag_) {
             drag_=false;const auto roi=view_.roi(start_,point);
-            if(roi.width<24 || roi.height<24) {status_="ROI 太小，请框选完整AprilGrid（36个标记）并保留白边";return;}
+            if(roi.width<24 || roi.height<24) {status_="ROI 太小，请框选可见的 AprilGrid 标记并保留白边";return;}
             setRoi(roi);status_="正在后台检测 ROI 内原始分辨率角点";
         }
     }

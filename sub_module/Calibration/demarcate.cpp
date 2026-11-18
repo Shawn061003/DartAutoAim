@@ -229,6 +229,7 @@ struct Sample {
     std::vector<cv::Point2f> points;
     std::string image;
     std::uint64_t frameId = 0;
+    std::vector<int> pointIds{};
 };
 
 struct FrameWriteError : std::runtime_error { using std::runtime_error::runtime_error; };
@@ -275,7 +276,8 @@ Solution solve(const Options& o, cv::Size size, std::vector<Sample> samples, int
     result.data = cv::makePtr<calib::calibrationData>(); result.data->imageSize = size;
     auto& data = *result.data;
     for (const auto& sample : result.samples) {
-        data.imagePoints.push_back(sample.points); data.objectPoints.push_back(objectTemplate(o));
+        data.imagePoints.push_back(sample.points);
+        data.objectPoints.push_back(aprilgrid::objectPoints(sample.pointIds,sample.points.size()));
     }
     if (result.samples.size() < 3) return result;
     data.cameraMatrix = cv::Mat::eye(3, 3, CV_64F);
@@ -338,7 +340,8 @@ void saveReport(const Options& o, const Solution& solution) {
         const auto& sample = solution.samples[i];
         file << "{" << "image" << sample.image << "frame_id" << std::to_string(sample.frameId)
              << "offset_x" << 0 << "offset_y" << 0 << "source_width" << d.imageSize.width << "source_height" << d.imageSize.height
-             << "image_points_reference" << sample.points << "rvec" << d.rvecs[i] << "tvec_mm" << d.tvecs[i] << "}";
+             << "image_points_reference" << sample.points << "corner_ids" << sample.pointIds
+             << "rvec" << d.rvecs[i] << "tvec_mm" << d.tvecs[i] << "}";
     }
     file << "]"; file.release();
     fs::rename(temporary, o.output / "intrinsics.yaml");

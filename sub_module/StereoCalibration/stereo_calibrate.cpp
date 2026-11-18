@@ -99,12 +99,14 @@ bool Detect(const cv::Mat& image, std::vector<cv::Point2f>& points, bool realtim
     return aprilgrid::detect(image,points);
 }
 
-MonocularFit FitMonocular(const std::vector<std::vector<cv::Point2f>>& points,cv::Size size) {
+MonocularFit FitMonocular(const std::vector<std::vector<cv::Point2f>>& points,cv::Size size,
+    const std::vector<std::vector<int>>& ids) {
     Require(points.size()>=3 && !size.empty(),"Monocular fit needs at least 3 views and native image size");
-    const auto board=aprilgrid::objectPoints();
-    for(const auto& view:points) Require(view.size()==board.size(),"Incomplete AprilGrid in monocular fit");
+    Require(ids.empty() || ids.size()==points.size(),"Monocular ID/view count mismatch");
     MonocularFit result;result.camera.referenceSize=size;
-    std::vector<std::vector<cv::Point3f>> objects(points.size(),board);
+    std::vector<std::vector<cv::Point3f>> objects;
+    for(std::size_t i=0;i<points.size();++i)
+        objects.push_back(aprilgrid::objectPoints(ids.empty()?std::vector<int>{}:ids[i],points[i].size()));
     // 两侧各自从当前图片初始化，使用五参数畸变；不沿用配置中的旧K/D。
     result.camera.K=cv::Mat::eye(3,3,CV_64F);
     result.camera.D=cv::Mat::zeros(5,1,CV_64F);
@@ -119,8 +121,10 @@ MonocularFit FitMonocular(const std::vector<std::vector<cv::Point2f>>& points,cv
 }
 
 void WriteMonocularReport(const fs::path& path,const MonocularFit& fit,
-    const std::vector<std::vector<cv::Point2f>>& points,const std::vector<fs::path>& images) {
+    const std::vector<std::vector<cv::Point2f>>& points,const std::vector<fs::path>& images,
+    const std::vector<std::vector<int>>& ids) {
     Require(points.size()==images.size() && points.size()==fit.rvecs.size(),"Monocular report membership mismatch");
+    Require(ids.empty() || ids.size()==points.size(),"Monocular report ID/view count mismatch");
     cv::FileStorage file(path.string(),cv::FileStorage::WRITE);
     Require(file.isOpened(),"Cannot write monocular report: "+path.string());
     aprilgrid::writeSpecification(file);
@@ -132,6 +136,7 @@ void WriteMonocularReport(const fs::path& path,const MonocularFit& fit,
         <<"distance_validated"<<0<<"board_poses"<<"[";
     for(std::size_t i=0;i<points.size();++i)
         file<<"{"<<"image"<<images[i].string()<<"image_points_reference"<<points[i]
+            <<"corner_ids"<<(ids.empty()?std::vector<int>{}:ids[i])
             <<"rvec"<<fit.rvecs[i]<<"tvec_mm"<<fit.tvecs[i]<<"}";
     file<<"]";
 }
@@ -700,11 +705,11 @@ Solution SolveFixedIntrinsics(std::vector<LivePair> pairs,const Camera& left,con
     Solution result; result.pairs=std::move(pairs); if(result.pairs.size()<3) return result;
     result.leftFit.camera={left.K.clone(),left.D.clone(),left.referenceSize};
     result.rightFit.camera={right.K.clone(),right.D.clone(),right.referenceSize};
-    const auto board=aprilgrid::objectPoints();
-    std::vector<std::vector<cv::Point3f>> objects(result.pairs.size(),board);
+    std::vector<std::vector<cv::Point3f>> objects;
     std::vector<std::vector<cv::Point2f>> lp,rp;
     for(const auto& p:result.pairs) {
-        Require(p.pair.left.size()==board.size() && p.pair.right.size()==board.size(),"Incomplete stereo observations");
+        Require(p.pair.left.size()==p.pair.right.size(),"Stereo observation counts differ");
+        objects.push_back(aprilgrid::objectPoints(p.pair.pointIds,p.pair.left.size()));
         lp.push_back(p.pair.left); rp.push_back(p.pair.right);
     }
     cv::Mat kl=left.K.clone(),dl=left.D.clone(),kr=right.K.clone(),dr=right.D.clone();
@@ -715,7 +720,7 @@ Solution SolveFixedIntrinsics(std::vector<LivePair> pairs,const Camera& left,con
             cv::norm(result.T)>1e-6,"Invalid stereo calibration");
     Require(cv::norm(kl,left.K,cv::NORM_INF)==0 && cv::norm(dl,left.D,cv::NORM_INF)==0 &&
             cv::norm(kr,right.K,cv::NORM_INF)==0 && cv::norm(dr,right.D,cv::NORM_INF)==0,"Fixed intrinsics changed unexpectedly");
-    result.translationConstraint=RefineStereoTranslation(board,lp,rp,{left.K,left.D,right.K,right.D},
+    result.translationConstraint=RefineStereoTranslation(objects,lp,rp,{left.K,left.D,right.K,right.D},
         result.R,result.T,result.E,result.F,result.errors,result.rms);
     Require(result.errors.rows==static_cast<int>(result.pairs.size()) && result.errors.cols==2 && cv::checkRange(result.errors),"Invalid per-camera pair errors");
     UpdateEpipolarMetrics(result,left,right);
@@ -726,8 +731,9 @@ Solution SolveFixedIntrinsics(std::vector<LivePair> pairs,const Camera& left,con
 Solution Solve(std::vector<LivePair> pairs,cv::Size leftSize,cv::Size rightSize,int minimumPairs) {
     if(pairs.size()<3) {Solution empty;empty.pairs=std::move(pairs);return empty;}
     std::vector<std::vector<cv::Point2f>> lp,rp;
-    for(const auto& pair:pairs) {lp.push_back(pair.pair.left);rp.push_back(pair.pair.right);}
-    auto left=FitMonocular(lp,leftSize),right=FitMonocular(rp,rightSize);
+    std::vector<std::vector<int>> ids;
+    for(const auto& pair:pairs) {lp.push_back(pair.pair.left);rp.push_back(pair.pair.right);ids.push_back(pair.pair.pointIds);}
+    auto left=FitMonocular(lp,leftSize,ids),right=FitMonocular(rp,rightSize,ids);
     auto result=SolveFixedIntrinsics(std::move(pairs),left.camera,right.camera,minimumPairs);
     result.leftFit=std::move(left);result.rightFit=std::move(right);result.intrinsicsRefitted=true;
     return result;
@@ -816,7 +822,7 @@ void PrepareReport(const Options& o,const Solution& s,bool constrained) {
             <<"host_timestamp_diff_ms"<<(p.timestampsKnown?static_cast<int>(TimestampDifference(p.leftTime,p.rightTime)):-1)
             <<"left_offset_x"<<0<<"left_offset_y"<<0<<"right_offset_x"<<0<<"right_offset_y"<<0
             <<"right_corner_order_reversed"<<static_cast<int>(p.pair.rightReversed)
-            <<"image_points_left_reference"<<p.pair.left<<"image_points_right"<<p.pair.right
+            <<"image_points_left_reference"<<p.pair.left<<"image_points_right"<<p.pair.right<<"corner_ids"<<p.pair.pointIds
             <<"left_rms_px"<<s.errors.at<double>(static_cast<int>(i),0)<<"right_rms_px"<<s.errors.at<double>(static_cast<int>(i),1)
             <<"epipolar_rms_px"<<s.perPair[i].rms<<"epipolar_p95_px"<<s.perPair[i].p95<<"}";
     }
@@ -828,13 +834,15 @@ void Save(const Options& o,const Solution& s) {
     PrepareReport(o,unconstrained,false);
     if(s.intrinsicsRefitted) {
         std::vector<std::vector<cv::Point2f>> lp,rp;
+        std::vector<std::vector<int>> ids;
         std::vector<fs::path> leftImages,rightImages;
         for(const auto& pair:s.pairs) {
             lp.push_back(pair.pair.left);rp.push_back(pair.pair.right);
+            ids.push_back(pair.pair.pointIds);
             leftImages.push_back(pair.pair.leftPath);rightImages.push_back(pair.pair.rightPath);
         }
-        WriteMonocularReport(o.output/"left_intrinsics.pending.yaml",s.leftFit,lp,leftImages);
-        WriteMonocularReport(o.output/"right_intrinsics.pending.yaml",s.rightFit,rp,rightImages);
+        WriteMonocularReport(o.output/"left_intrinsics.pending.yaml",s.leftFit,lp,leftImages,ids);
+        WriteMonocularReport(o.output/"right_intrinsics.pending.yaml",s.rightFit,rp,rightImages,ids);
     }
     for(const auto& stem:{std::string("reference"),std::string("reference_unconstrained")})
         fs::rename(o.output/(stem+".pending.png"),o.output/(stem+".png"));

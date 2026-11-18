@@ -69,12 +69,28 @@ int main() {
               Error(detection.left,expectedLeft)<.2 && Error(detection.right,expectedRight)<.2,"ROI detection lost native coordinates or result generation");
         cv::Mat partialLeft=pair.left.image.clone();partialLeft(cv::Rect(300+5*52,240,40,40)).setTo(cv::Scalar(210,210,210));
         const auto partial=DetectPair(partialLeft,pair.right.image,lr,rr,7,100);
-        Check(!partial.leftFound && partial.rightFound && partial.left.empty() && partial.right.size()==144 &&
+        Check(partial.leftFound && partial.rightFound && partial.left.size()==140 && partial.right.size()==140 && partial.pointIds.front()==4 &&
               partial.leftMarkers.ids.size()==35 && partial.leftMarkers.missing()==std::vector<int>{0} &&
-              partial.leftMarkers.attempts>1 && partial.rightMarkers.complete(),"Partial stereo detection bypassed full-board gate or lost per-camera diagnostics");
+              partial.leftMarkers.attempts>1 && partial.rightMarkers.complete(),"Partial stereo detection lost common ID correspondence");
         cv::Mat partialScreen(1000,1800,CV_8UC3,cv::Scalar(25,25,25));Viewport partialView;partialView.area={12,64,660,650};partialView.reset(partialLeft.size());
         DrawView(partialScreen,partialLeft,partialView,lr,partial.left,partial.leftMarkers);
         Check(cv::imwrite((root/"partial-review.png").string(),partialScreen),"Cannot render partial marker diagnostics");
+        auto leftSubset=aprilgrid::fromPoints(expectedLeft),rightSubset=aprilgrid::fromPoints(expectedRight);
+        leftSubset.ids.resize(30);leftSubset.corners.resize(30);
+        rightSubset.ids.erase(rightSubset.ids.begin(),rightSubset.ids.begin()+5);
+        rightSubset.corners.erase(rightSubset.corners.begin(),rightSubset.corners.begin()+5);
+        std::vector<cv::Point2f> matchedLeft,matchedRight;std::vector<int> matchedIds;
+        aprilgrid::correspond(leftSubset,rightSubset,matchedLeft,matchedRight,matchedIds);
+        Check(matchedIds.size()==100 && matchedIds.front()==20 && matchedIds.back()==119,
+              "Exactly 25 common IDs were not accepted with correct identities");
+        Check(matchedLeft.front()==expectedLeft[20] && matchedRight.front()==expectedRight[20],"Stereo IDs were matched by vector position");
+        leftSubset.ids.pop_back();leftSubset.corners.pop_back();
+        aprilgrid::correspond(leftSubset,rightSubset,matchedLeft,matchedRight,matchedIds);
+        Check(matchedIds.empty() && matchedLeft.empty() && matchedRight.empty(),"24 common IDs bypassed the threshold");
+        leftSubset.duplicates={5};
+        Check(aprilgrid::visiblePoints(leftSubset).empty(),"Duplicate IDs accepted");
+        auto duplicateFull=aprilgrid::fromPoints(expectedLeft);duplicateFull.duplicates={0};
+        Check(aprilgrid::visiblePoints(duplicateFull).empty(),"Complete board with duplicate IDs accepted");
         std::vector<cv::Point2f> missing{{1,2}};
         Check(!DetectRoi(pair.left.image,{0,0,100,100},missing) && missing.empty(),"Missing ROI reused old corners");
         Check(!DetectRoi(pair.left.image,{-5,0,100,100},missing),"Out-of-image ROI accepted");
@@ -94,7 +110,8 @@ int main() {
         Check(Selected(replaced.records).empty(),"Modified source image reused stale accepted corners");fs::last_write_time(source,stamp);
         // A partially detected pane can be corrected and resumed without fabricating missing IDs.
         auto partialRecords=loaded.records;partialRecords[0].state=Record::State::Pending;
-        partialRecords[0].sample.pair.left.clear();partialRecords[0].leftManualMarkers=partial.leftMarkers;
+        partialRecords[0].sample.pair.left.clear();
+        partialRecords[0].leftManualMarkers=partial.leftMarkers;
         SaveAnnotations(annotations,partialRecords);
         Settings partialSettings;partialSettings.input=root/"capture";partialSettings.output=root/"PartialResult";
         Camera partialCameraLeft,partialCameraRight;partialCameraLeft.referenceSize=pair.left.image.size();partialCameraRight.referenceSize=pair.right.image.size();
@@ -102,10 +119,10 @@ int main() {
         const cv::Point partialHit=partialReview.viewport(0).project(expectedLeft[20]),partialDrop=partialHit+cv::Point(2,2);
         partialReview.mouse(cv::EVENT_LBUTTONDOWN,partialHit.x,partialHit.y,0);partialReview.mouse(cv::EVENT_LBUTTONUP,partialDrop.x,partialDrop.y,0);
         const auto manual=partialReview.records()[0].leftManualMarkers;
-        Check(manual.ids.size()==35 && manual.missing()==std::vector<int>{0} && partialReview.records()[0].sample.pair.left.empty() &&
+        Check(manual.ids.size()==35 && manual.missing()==std::vector<int>{0} && partialReview.records()[0].sample.pair.left.size()==140 &&
               cv::norm(manual.corners[4][0]-(partial.leftMarkers.corners[4][0]+cv::Point2f(2./partialReview.viewport(0).scale(),2./partialReview.viewport(0).scale())))<1e-4,
               "Partial stereo correction lost native coordinates or synthesized a complete board");
-        partialReview.key(' ');Check(Selected(partialReview.records()).empty(),"Partial manual stereo correction was accepted");partialReview.finish();
+        partialReview.key(' ');Check(Selected(partialReview.records()).size()==1,"Partial manual stereo correction was rejected");partialReview.finish();
         partialSettings.output=root/"PartialReload";Review partialReload(partialSettings,partialCameraLeft,partialCameraRight);
         partialReload.update();Check(partialReload.records()[0].leftManualMarkers.corners==manual.corners,"Partial stereo correction did not resume");partialReload.finish();
         // Create an offline dataset with known projected observations for an actual incremental constrained fit.
@@ -122,6 +139,34 @@ int main() {
             r.leftRoi=lr;r.rightRoi=rr;r.state=Record::State::Accepted;
         }
         SaveAnnotations(input/"annotations.yaml",data.records);Settings settings;settings.input=input;settings.output=root/"Result";settings.minPairs=3;
+        // Vary the visible IDs per view and exercise solve, export, annotation reload and fixed K/D.
+        Settings sparse=settings;sparse.input=root/"SparseInput";sparse.output=root/"SparseResult";
+        fs::create_directories(sparse.input/"left");fs::create_directory(sparse.input/"right");
+        auto sparseData=data;
+        for(std::size_t i=0;i<sparseData.records.size();++i) {
+            auto& record=sparseData.records[i];auto& sample=record.sample.pair;
+            for(const auto& path:{sample.leftPath,sample.rightPath})
+                fs::copy_file(path,sparse.input/path.parent_path().filename()/path.filename());
+            sample.leftPath=sparse.input/"left"/sample.leftPath.filename();
+            sample.rightPath=sparse.input/"right"/sample.rightPath.filename();
+            if(i>=3) continue;
+            const int first=4*static_cast<int>(i),count=4*(25+static_cast<int>(i));
+            sample.left=std::vector<cv::Point2f>(sample.left.begin()+first,sample.left.begin()+first+count);
+            sample.right=std::vector<cv::Point2f>(sample.right.begin()+first,sample.right.begin()+first+count);
+            for(int j=0;j<count;++j) sample.pointIds.push_back(first+j);
+        }
+        SaveAnnotations(sparse.input/"annotations.yaml",sparseData.records);
+        Review sparseReview(sparse,left,right);Poll(sparseReview,[&]{return !sparseReview.solution().R.empty();});
+        Check(sparseReview.solution().intrinsicsRefitted && cv::norm(sparseReview.solution().T-translation)<.2,
+              "Partial-ID monocular/stereo fit failed to recover known extrinsics");
+        Check(sparseReview.finish()==0,"Partial-ID stereo fit failed quality checks");
+        auto restoredSparse=ReadDataset(sparse.input);LoadAnnotations(sparse.input/"annotations.yaml",restoredSparse.records,left.referenceSize,right.referenceSize);
+        Check(restoredSparse.records[1].sample.pair.pointIds==sparseData.records[1].sample.pair.pointIds,
+              "Partial-ID annotations lost physical point identities");
+        sparse.fixedIntrinsics=true;sparse.output=root/"SparseFixedResult";
+        Review sparseFixed(sparse,left,right);Poll(sparseFixed,[&]{return !sparseFixed.solution().R.empty();});
+        Check(cv::norm(sparseFixed.solution().T-translation)<.1 && sparseFixed.finish()==0,
+              "Fixed-intrinsics partial-ID fit failed");
         // 错误旧内参不应影响新流程：每轮必须从当前图片独立恢复K/D。
         Camera wrongLeft=left,wrongRight=right;
         wrongLeft.K=left.K.clone();wrongRight.K=right.K.clone();

@@ -110,6 +110,21 @@ int main() {
             require(std::abs(rms-solution.data->perViewErrors.at<double>(static_cast<int>(i)))<1e-4,"Saved per-view errors do not match retained solution");
         }
         auto autoOptions=options; autoOptions.model="auto";
+        auto sparseSamples=samples;
+        for(std::size_t i=0;i<sparseSamples.size();++i) {
+            auto& sample=sparseSamples[i];const int first=4*static_cast<int>(i%3),count=4*(25+static_cast<int>(i%6));
+            sample.points=std::vector<cv::Point2f>(sample.points.begin()+first,sample.points.begin()+first+count);
+            for(int j=0;j<count;++j) sample.pointIds.push_back(first+j);
+        }
+        const auto sparseSolution=solve(options,size,sparseSamples,0);
+        require(sparseSolution.samples.size()==8 && sparseSolution.data->totalAvgErr<.06 &&
+                std::abs(sparseSolution.data->cameraMatrix.at<double>(0,0)-1050)<15,
+                "Partial-ID monocular fit/filter did not recover known intrinsics");
+        for(std::size_t i=0;i<sparseSolution.samples.size();++i) {
+            const auto& sample=sparseSolution.samples[i];
+            require(sparseSolution.data->objectPoints[i]==aprilgrid::objectPoints(sample.pointIds,sample.points.size()),
+                    "Filtering detached sparse physical IDs from retained images");
+        }
         auto autoSolution=solve(autoOptions,size,samples,0);
         require(autoSolution.data->totalAvgErr<0.1,"Official flag tuning did not converge");
         auto narrowOptions=options; narrowOptions.model="narrow";

@@ -52,23 +52,28 @@ struct TranslationConstraintReport {
 // Fixed K/D bundle adjustment: one shared rig pose and an independent board pose per image pair.
 // T = center + halfWidth*tanh(q) enforces the bounds on every optimizer evaluation.
 class BoundedStereoProblem : public cv::LMSolver::Callback {
-    std::vector<cv::Point3d> board_;
+    std::vector<std::vector<cv::Point3d>> boards_;
     std::vector<std::vector<cv::Point2f>> left_,right_;
     FixedStereoIntrinsics cameras_;
 public:
     TranslationBounds bounds;
-    BoundedStereoProblem(const std::vector<cv::Point3f>& board,
+    BoundedStereoProblem(const std::vector<std::vector<cv::Point3f>>& boards,
         const std::vector<std::vector<cv::Point2f>>& left,
         const std::vector<std::vector<cv::Point2f>>& right,
         FixedStereoIntrinsics cameras,double initialX)
         :left_(left),right_(right),cameras_(std::move(cameras)),bounds(initialX) {
-        for (const auto& point:board) board_.emplace_back(point.x,point.y,point.z);
-        if (board_.empty() || left_.empty() || left_.size()!=right_.size())
+        for(const auto& board:boards) boards_.emplace_back(board.begin(),board.end());
+        if (left_.empty() || boards_.size()!=left_.size() || left_.size()!=right_.size())
             throw std::runtime_error("Invalid observations for bounded stereo calibration");
         for (std::size_t i=0;i<left_.size();++i)
-            if (left_[i].size()!=board_.size() || right_[i].size()!=board_.size())
+            if (boards_[i].size()<4 || left_[i].size()!=boards_[i].size() || right_[i].size()!=boards_[i].size())
                 throw std::runtime_error("Incomplete observations for bounded stereo calibration");
     }
+    BoundedStereoProblem(const std::vector<cv::Point3f>& board,
+        const std::vector<std::vector<cv::Point2f>>& left,
+        const std::vector<std::vector<cv::Point2f>>& right,
+        FixedStereoIntrinsics cameras,double initialX)
+        :BoundedStereoProblem(std::vector<std::vector<cv::Point3f>>(left.size(),board),left,right,std::move(cameras),initialX) {}
     cv::Mat initialize(const cv::Mat& rotation,const cv::Mat& translation) const {
         cv::Mat parameters=cv::Mat::zeros(6+6*static_cast<int>(left_.size()),1,CV_64F);
         cv::Mat rotationVector; cv::Rodrigues(rotation,rotationVector);
@@ -80,7 +85,7 @@ public:
         }
         for (std::size_t i=0;i<left_.size();++i) {
             cv::Mat rv,tv;
-            if (!cv::solvePnP(board_,left_[i],cameras_.leftK,cameras_.leftD,rv,tv) || tv.at<double>(2)<=0)
+            if (!cv::solvePnP(boards_[i],left_[i],cameras_.leftK,cameras_.leftD,rv,tv) || tv.at<double>(2)<=0)
                 throw std::runtime_error("Cannot initialize a front-facing board pose");
             const int base=6+6*static_cast<int>(i);
             rv.copyTo(parameters.rowRange(base,base+3)); tv.copyTo(parameters.rowRange(base+3,base+6));
@@ -90,14 +95,16 @@ public:
     bool compute(cv::InputArray input,cv::OutputArray error,cv::OutputArray jacobian) const override {
         const cv::Mat p=input.getMat();
         const bool derivatives=jacobian.needed();
-        const int points=static_cast<int>(board_.size()),rows=4*points*static_cast<int>(left_.size());
+        int rows=0;
+        for(const auto& board:boards_) rows+=4*static_cast<int>(board.size());
         error.create(rows,1,CV_64F); cv::Mat residual=error.getMat();
         cv::Mat J;
         if (derivatives) { jacobian.create(rows,p.rows,CV_64F); J=jacobian.getMat(); J.setTo(0); }
         cv::Vec3d dTranslation;
         const cv::Mat rigRotation=p.rowRange(0,3),rigTranslation=bounds.decode(p,&dTranslation);
+        int row=0;
         for (std::size_t view=0;view<left_.size();++view) {
-            const int base=6+6*static_cast<int>(view),row=4*points*static_cast<int>(view);
+            const int base=6+6*static_cast<int>(view),points=static_cast<int>(boards_[view].size());
             const cv::Mat boardRotation=p.rowRange(base,base+3),boardTranslation=p.rowRange(base+3,base+6);
             cv::Mat rightRotation,rightTranslation,rrBoard,rrRig,ttBoard,ttRig,rtBoard,rtRig,trBoard,trRig;
             if (derivatives) {
@@ -107,11 +114,11 @@ public:
             std::vector<cv::Point2d> projectedLeft,projectedRight;
             cv::Mat jl,jr;
             if (derivatives) {
-                cv::projectPoints(board_,boardRotation,boardTranslation,cameras_.leftK,cameras_.leftD,projectedLeft,jl);
-                cv::projectPoints(board_,rightRotation,rightTranslation,cameras_.rightK,cameras_.rightD,projectedRight,jr);
+                cv::projectPoints(boards_[view],boardRotation,boardTranslation,cameras_.leftK,cameras_.leftD,projectedLeft,jl);
+                cv::projectPoints(boards_[view],rightRotation,rightTranslation,cameras_.rightK,cameras_.rightD,projectedRight,jr);
             } else {
-                cv::projectPoints(board_,boardRotation,boardTranslation,cameras_.leftK,cameras_.leftD,projectedLeft);
-                cv::projectPoints(board_,rightRotation,rightTranslation,cameras_.rightK,cameras_.rightD,projectedRight);
+                cv::projectPoints(boards_[view],boardRotation,boardTranslation,cameras_.leftK,cameras_.leftD,projectedLeft);
+                cv::projectPoints(boards_[view],rightRotation,rightTranslation,cameras_.rightK,cameras_.rightD,projectedRight);
             }
             for (int j=0;j<points;++j) {
                 residual.at<double>(row+2*j)=projectedLeft[j].x-left_[view][j].x;
@@ -131,6 +138,7 @@ public:
                 rigJacobian.copyTo(J(cv::Rect(0,row+2*points,6,2*points)));
                 boardJacobian.copyTo(J(cv::Rect(base,row+2*points,6,2*points)));
             }
+            row+=4*points;
         }
         return cv::checkRange(residual) && (!derivatives || cv::checkRange(J));
     }
@@ -140,7 +148,7 @@ public:
         for (std::size_t view=0;view<left_.size();++view) {
             const int base=6+6*static_cast<int>(view);
             cv::Mat boardRotation; cv::Rodrigues(p.rowRange(base,base+3),boardRotation);
-            for (const auto& point:board_) {
+            for (const auto& point:boards_[view]) {
                 const cv::Mat left=boardRotation*(cv::Mat_<double>(3,1)<<point.x,point.y,point.z)+p.rowRange(base+3,base+6);
                 const cv::Mat right=rigRotation*left+rigTranslation;
                 if (left.at<double>(2)<=0 || right.at<double>(2)<=0) return false;
@@ -150,14 +158,14 @@ public:
     }
 };
 
-inline TranslationConstraintReport RefineStereoTranslation(const std::vector<cv::Point3f>& board,
+inline TranslationConstraintReport RefineStereoTranslation(const std::vector<std::vector<cv::Point3f>>& boards,
     const std::vector<std::vector<cv::Point2f>>& left,const std::vector<std::vector<cv::Point2f>>& right,
     const FixedStereoIntrinsics& cameras,cv::Mat& R,cv::Mat& T,cv::Mat& E,cv::Mat& F,cv::Mat& errors,double& rms) {
     TranslationConstraintReport report;
     report.initialR=R.clone(); report.initialT=T.clone(); report.initialRms=rms;
     // Preserve the original OpenCV result before bounded refinement reuses output buffers.
     report.initialE=E.clone(); report.initialF=F.clone(); report.initialErrors=errors.clone();
-    auto problem=cv::makePtr<BoundedStereoProblem>(board,left,right,cameras,T.at<double>(0));
+    auto problem=cv::makePtr<BoundedStereoProblem>(boards,left,right,cameras,T.at<double>(0));
     report.lowerMm=problem->bounds.lower(); report.upperMm=problem->bounds.upper();
     cv::Mat parameters=problem->initialize(R,T);
     constexpr int maxIterations=200;
@@ -170,16 +178,26 @@ inline TranslationConstraintReport RefineStereoTranslation(const std::vector<cv:
     report.atLimit=problem->bounds.nearLimit(T);
     cv::Mat residual; if (!problem->compute(parameters,residual,cv::noArray()))
         throw std::runtime_error("Nonfinite bounded stereo residuals");
-    const int count=static_cast<int>(board.size());
     errors.create(static_cast<int>(left.size()),2,CV_64F);
-    for (int i=0;i<errors.rows;++i) for (int side=0;side<2;++side)
-        errors.at<double>(i,side)=cv::norm(residual.rowRange(4*count*i+2*count*side,4*count*i+2*count*(side+1)))/std::sqrt(count);
-    rms=cv::norm(residual)/std::sqrt(2.*count*left.size());
+    int row=0;
+    for (int i=0;i<errors.rows;++i) {
+        const int count=static_cast<int>(boards[i].size());
+        for (int side=0;side<2;++side)
+            errors.at<double>(i,side)=cv::norm(residual.rowRange(row+2*count*side,row+2*count*(side+1)))/std::sqrt(count);
+        row+=4*count;
+    }
+    rms=cv::norm(residual)/std::sqrt(residual.rows/2.);
     const double x=T.at<double>(0),y=T.at<double>(1),z=T.at<double>(2);
     const cv::Mat skew=(cv::Mat_<double>(3,3)<<0.,-z,y,z,0.,-x,-y,x,0.);
     E=skew*R; F=cameras.rightK.inv().t()*E*cameras.leftK.inv();
     if (!std::isfinite(rms) || !cv::checkRange(F)) throw std::runtime_error("Invalid bounded stereo result");
     return report;
+}
+
+inline TranslationConstraintReport RefineStereoTranslation(const std::vector<cv::Point3f>& board,
+    const std::vector<std::vector<cv::Point2f>>& left,const std::vector<std::vector<cv::Point2f>>& right,
+    const FixedStereoIntrinsics& cameras,cv::Mat& R,cv::Mat& T,cv::Mat& E,cv::Mat& F,cv::Mat& errors,double& rms) {
+    return RefineStereoTranslation(std::vector<std::vector<cv::Point3f>>(left.size(),board),left,right,cameras,R,T,E,F,errors,rms);
 }
 
 inline void WriteTranslationConstraint(cv::FileStorage& yaml,const TranslationConstraintReport& report) {

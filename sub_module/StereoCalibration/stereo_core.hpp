@@ -19,9 +19,11 @@ struct MonocularFit {
     cv::Mat perViewErrors;
     std::vector<cv::Mat> rvecs,tvecs;
 };
-MonocularFit FitMonocular(const std::vector<std::vector<cv::Point2f>>&,cv::Size);
+MonocularFit FitMonocular(const std::vector<std::vector<cv::Point2f>>&,cv::Size,
+    const std::vector<std::vector<int>>& ids={});
 void WriteMonocularReport(const fs::path&,const MonocularFit&,
-    const std::vector<std::vector<cv::Point2f>>&,const std::vector<fs::path>&);
+    const std::vector<std::vector<cv::Point2f>>&,const std::vector<fs::path>&,
+    const std::vector<std::vector<int>>& ids={});
 struct Pair {
     std::size_t group;
     int number;
@@ -29,6 +31,7 @@ struct Pair {
     std::vector<cv::Point2f> left, right; // 左全幅参考坐标 / 右原图坐标。
     bool rightReversed = false;
     double epipolarRms = 0;
+    std::vector<int> pointIds{}; // 每个角点为 4*tag_id+corner；空值兼容旧完整观测。
 };
 void Require(bool,const std::string&);
 Camera ReadCamera(const fs::path&);
