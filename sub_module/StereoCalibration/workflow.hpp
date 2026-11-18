@@ -22,6 +22,7 @@ struct Settings {
     fs::path output;
     int pairMs=-1,minPairs=10,maxPairs=30;
     double interval=1.;
+    bool fixedIntrinsics=false;
     bool help=false;
 };
 inline Settings ParseSettings(int argc,char** argv) {
@@ -29,6 +30,7 @@ inline Settings ParseSettings(int argc,char** argv) {
         "{help h | | Show help without opening cameras}"
         "{collect | | Collect receive-time paired native BMPs; no target detection}"
         "{calibration | | Offline paired-image ROI annotation and bounded stereo calibration}"
+        "{fixed-intrinsics | | Use the left and right K/D from dart.yaml to solve stereo extrinsics}"
         "{config | | dart.yaml path}"
         "{input | | Dataset root containing left/ and right/; default: StereoCalibration/Input}"
         "{output | | NEW calibration result directory}"
@@ -40,25 +42,31 @@ inline Settings ParseSettings(int argc,char** argv) {
     if (parser.has("help")) {
         parser.printMessage();
         std::cout<<"./build/stereo_calibration --collect [--pair-ms=20 --interval=1]\n"
-                 <<"./build/stereo_calibration --calibration [--input=/path/to/Input]\n"
-                 <<"Board: 6x6 tag36h11, 88 mm tags, 26.4 mm gaps, borderBits=2. Refit left/right K/D, then fix them for stereo.\n"
+                 <<"./build/stereo_calibration --calibration [--fixed-intrinsics] [--input=/path/to/Input]\n"
+                 <<"Board: 6x6 tag36h11, 88 mm tags, 26.4 mm gaps, borderBits=2.\n"
                  <<"Bounds in RIGHT optical frame (right/down/forward): |Tx|=450..570, |Ty|<=60, |Tz|<=160 mm.\n"
                  <<"Collection: A=auto/pause, SPACE=save pair, ESC/Q=quit.\n"
                  <<"Calibration: LMB=ROI, wheel=zoom, RMB click=zoom in, Shift+RMB=zoom out, RMB drag=pan, SPACE=accept+next, N=skip, B=back, P=next,\n"
                  <<"R=clear ROIs, D=remove from fit, U=undo, S=save, 0=reset zoom, 1/2=L zoom, 3/4=R zoom, [/]=list scroll, ESC/Q=quit.\n";
         s.help=true;return s;
     }
-    const std::vector<std::string> known{"collect","calibration","config","input","output","pair-ms","interval","min-pairs","max-pairs"};
+    const std::vector<std::string> flags{"collect","calibration","fixed-intrinsics"};
+    const std::vector<std::string> options{"config","input","output","pair-ms","interval","min-pairs","max-pairs"};
     for (int i=1;i<argc;++i) {
         const std::string arg=argv[i];const auto equal=arg.find('=');
         Require(arg.rfind("--",0)==0,"Use --collect / --calibration and --name=value options");
         const auto key=arg.substr(2,equal==std::string::npos?equal:equal-2);
-        Require(std::find(known.begin(),known.end(),key)!=known.end(),"Unknown option: "+key);
-        if (key!="collect" && key!="calibration") Require(equal!=std::string::npos,"Use --name=value options");
-        else Require(equal==std::string::npos,"Use bare --collect / --calibration flags");
+        if (std::find(flags.begin(),flags.end(),key)!=flags.end()) {
+            Require(equal==std::string::npos,"Use --"+key+" without a value");
+        } else {
+            Require(std::find(options.begin(),options.end(),key)!=options.end(),"Unknown option: "+key);
+            Require(equal!=std::string::npos,"Use --name=value options");
+        }
     }
     Require(parser.has("collect")!=parser.has("calibration"),"Choose exactly one of --collect or --calibration");
     s.mode=parser.has("collect")?Settings::Mode::Collect:Settings::Mode::Calibration;
+    s.fixedIntrinsics=parser.has("fixed-intrinsics");
+    Require(!s.fixedIntrinsics || s.mode==Settings::Mode::Calibration,"--fixed-intrinsics requires --calibration");
     if(parser.has("config")) s.config=parser.get<std::string>("config");
     if(parser.has("input")) s.input=parser.get<std::string>("input");
     s.output=parser.get<std::string>("output");

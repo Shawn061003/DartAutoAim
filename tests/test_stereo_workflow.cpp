@@ -39,6 +39,10 @@ int main() {
         Reject([&]{parse({"stereo_calibration","--collect","--calibration"});},"Ambiguous collection/calibration mode accepted");
         Reject([&]{parse({"stereo_calibration","--calibration","--unknown=1"});},"Unknown workflow argument accepted");
         Reject([&]{parse({"stereo_calibration","--collect","--interval=nan"});},"Nonfinite collection interval accepted");
+        Check(!parse({"stereo_calibration","--calibration"}).fixedIntrinsics &&
+              parse({"stereo_calibration","--calibration","--fixed-intrinsics"}).fixedIntrinsics,
+              "Fixed-intrinsics CLI flag did not select the requested mode");
+        Reject([&]{parse({"stereo_calibration","--collect","--fixed-intrinsics"});},"Fixed intrinsics accepted in collection mode");
         {PairWriter empty(root/"empty_capture",5);}
         {PairWriter retry(root/"empty_capture",20);Check(retry.count()==0,"Empty failed collection could not be retried");}
         // Lossless collection, explicit timing gate and refusal to overwrite a prior session.
@@ -198,6 +202,25 @@ int main() {
               static_cast<std::string>(unrestricted["capture_mode"])=="offline_manual_roi_native_full_frames" &&
               static_cast<int>(unrestricted["pairs"][0]["frame_timestamps_available"])==0 && fs::exists(settings.output/"reference_unconstrained.png"),
               "Offline save did not include a matching complete unrestricted calibration report");
+        auto fixed=settings;fixed.fixedIntrinsics=true;fixed.output=root/"FixedResult";
+        Review fixedReview(fixed,left,right);
+        Poll(fixedReview,[&]{return !fixedReview.solution().R.empty();});
+        Check(!fixedReview.solution().intrinsicsRefitted && cv::norm(fixedReview.solution().T-translation)<.1,
+              "Fixed-intrinsics review refitted K/D or failed to recover known translation");
+        Check(fixedReview.finish()==0,"Fixed-intrinsics result failed quality checks");
+        for(const auto* name:{"stereo.yaml","stereo_unconstrained.yaml"}) {
+            cv::FileStorage fixedReport((fixed.output/name).string(),cv::FileStorage::READ);
+            cv::Mat kl,dl,kr,dr;
+            fixedReport["K_left_reference"]>>kl;fixedReport["D_left"]>>dl;
+            fixedReport["K_right"]>>kr;fixedReport["D_right"]>>dr;
+            Check(cv::norm(kl-left.K)==0 && cv::norm(dl-left.D)==0 &&
+                  cv::norm(kr-right.K)==0 && cv::norm(dr-right.D)==0 &&
+                  static_cast<std::string>(fixedReport["intrinsics_policy"])=="CALIB_FIX_INTRINSIC" &&
+                  static_cast<std::string>(fixedReport["config_source"])==fixed.config.string(),
+                  "Fixed-intrinsics report changed K/D or lost its source");
+        }
+        Check(!fs::exists(fixed.output/"left_intrinsics.yaml") && !fs::exists(fixed.output/"right_intrinsics.yaml"),
+              "Fixed-intrinsics review wrote new monocular reports");
         Settings list=settings;list.input=root/"List";list.output=root/"ListResult";
         fs::create_directories(list.input/"left");fs::create_directory(list.input/"right");
         for(int i=0;i<22;++i) for(const auto* side:{"left","right"})

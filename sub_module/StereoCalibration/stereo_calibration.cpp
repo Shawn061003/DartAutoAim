@@ -196,12 +196,19 @@ class Review {
         needFit_=false;const auto snapshot=Selected(dataset_.records);const auto revision=revision_;
         if(snapshot.size()<3) {solved_={};solvedRevision_=revision_;return;}
         const auto left=left_,right=right_;const int minimum=settings_.minPairs;
-        fitting_=std::async(std::launch::async,[snapshot,revision,left,right,minimum] {return std::make_pair(revision,Solve(snapshot,left.referenceSize,right.referenceSize,minimum));});
+        fitting_=std::async(std::launch::async,[snapshot,revision,left,right,minimum,fixed=settings_.fixedIntrinsics] {
+            auto solution=fixed ? SolveFixedIntrinsics(snapshot,left,right,minimum)
+                                : Solve(snapshot,left.referenceSize,right.referenceSize,minimum);
+            return std::make_pair(revision,std::move(solution));
+        });
     }
     void finishFit() {
         auto result=fitting_.get();if(result.first!=revision_) return;
         solved_=std::move(result.second);solvedRevision_=revision_;
-        std::cout<<"Monocular RMS left="<<solved_.leftFit.rms<<" right="<<solved_.rightFit.rms<<"; Fit pairs:";for(const auto& p:solved_.pairs) std::cout<<' '<<p.pair.number;
+        if(solved_.intrinsicsRefitted)
+            std::cout<<"Monocular RMS left="<<solved_.leftFit.rms<<" right="<<solved_.rightFit.rms<<"; ";
+        else std::cout<<"Fixed intrinsics; ";
+        std::cout<<"Fit pairs:";for(const auto& p:solved_.pairs) std::cout<<' '<<p.pair.number;
         std::cout<<"; RMS="<<solved_.rms<<" epi P95="<<solved_.epiP95<<" T_mm="<<solved_.T.t()
                  <<"; free T_mm="<<solved_.translationConstraint.initialT.t()<<" free RMS="<<solved_.translationConstraint.initialRms<<'\n';
     }
@@ -211,7 +218,7 @@ class Review {
         if(solved_.R.empty() || solvedRevision_!=revision_) {status_="标注已保存；至少接受 3 组图片并完成求解后才能保存结果";return;}
         const auto snapshot=solved_;const auto options=reportOptions();const auto rev=revision_;
         saving_=std::async(std::launch::async,[snapshot,options,rev] {Save(options,snapshot);return rev;});
-        status_="后台保存左右新内参、有约束和无约束双目结果";
+        status_="后台保存有约束和无约束双目结果";
     }
 public:
     Review(Settings settings,Camera left,Camera right):settings_(std::move(settings)),left_(std::move(left)),right_(std::move(right)),dataset_(ReadDataset(settings_.input)) {
@@ -231,7 +238,7 @@ public:
     std::size_t currentIndex() const {return index_;}
     void update() {
         if(saving_.valid() && saving_.wait_for(std::chrono::seconds(0))==std::future_status::ready) {
-            try {savedRevision_=saving_.get();status_=savedRevision_==revision_?"已保存左右新内参、双目结果及参考图":"已保存上一版结果；当前选择已改变";}
+            try {savedRevision_=saving_.get();status_=savedRevision_==revision_?"已保存双目结果及参考图":"已保存上一版结果；当前选择已改变";}
             catch(const std::exception& e){status_=std::string("结果保存失败：")+e.what();}
         }
         if(fitting_.valid() && fitting_.wait_for(std::chrono::seconds(0))==std::future_status::ready) {
@@ -366,7 +373,9 @@ public:
             Label(canvas,"基线长度："+Number(cv::norm(solved_.T),2)+" mm",x,201);
             Label(canvas,"T mm: "+Number(solved_.T.at<double>(0),1)+", "+Number(solved_.T.at<double>(1),1)+", "+Number(solved_.T.at<double>(2),1),x,229);
             for(int row=0;row<3;++row) Label(canvas,(row==0?"R: ":"   ")+Number(solved_.R.at<double>(row,0),5)+" "+Number(solved_.R.at<double>(row,1),5)+" "+Number(solved_.R.at<double>(row,2),5),x,257+row*27,kWhite,.46);
-            Label(canvas,"单目 RMS 左/右："+Number(solved_.leftFit.rms,2)+" / "+Number(solved_.rightFit.rms,2)+" px",x,339);
+            if(solved_.intrinsicsRefitted)
+                Label(canvas,"单目 RMS 左/右："+Number(solved_.leftFit.rms,2)+" / "+Number(solved_.rightFit.rms,2)+" px",x,339);
+            else Label(canvas,"内参固定：使用配置中的左右 K/D",x,339);
             Label(canvas,solved_.translationConstraint.atLimit?"T：接近约束边界":"T：位于约束范围内",x,366,solved_.translationConstraint.atLimit?kYellow:kGreen);
             Label(canvas,solved_.passed?"质量检查通过（测距尚未验证）":"质量检查未通过：数量、误差或收敛状态",x,393,solved_.passed?kGreen:kYellow,.43);
         } else Label(canvas,count(Record::State::Accepted)<3?"接受至少 3 组图片后显示 RMS":"等待当前数据的求解结果",x,120,kYellow);
@@ -395,7 +404,7 @@ public:
     }
 };
 int Calibrate(const Settings& settings) {
-    // 离线模式从图片读取原生尺寸，内参由每轮选中的角点重新求解，无须旧配置内参。
+    // 两种求解模式都从 BMP 确认原生尺寸。
     const auto data=ReadDataset(settings.input);
     Camera left,right;
     for(const auto& record:data.records) {
@@ -405,6 +414,15 @@ int Calibrate(const Settings& settings) {
         left.referenceSize=li.size();right.referenceSize=ri.size();break;
     }
     Require(!left.referenceSize.empty() && !right.referenceSize.empty(),"No decodable paired BMPs in dataset");
+    if(settings.fixedIntrinsics) {
+        const DartCongfig config(settings.config.string());
+        Require(left.referenceSize==cv::Size(config.leftCamera.width,config.leftCamera.height),
+                "Left BMP size differs from cameras.left image_width/image_height in --config");
+        Require(right.referenceSize==cv::Size(config.rightCamera.width,config.rightCamera.height),
+                "Right BMP size differs from cameras.right image_width/image_height in --config");
+        left=Intrinsics(config.leftCamera,{});
+        right=Intrinsics(config.rightCamera,{});
+    }
     cv::setNumThreads(4);CameraStopSignals signals;Review app(settings,left,right);
     std::cout<<"Offline ROI calibration. No cameras are opened. Input="<<settings.input<<" output="<<settings.output<<'\n';
     cv::namedWindow(kReviewWindow,cv::WINDOW_NORMAL);cv::resizeWindow(kReviewWindow,1620,900);cv::setMouseCallback(kReviewWindow,Review::Mouse,&app);

@@ -1,7 +1,7 @@
 # StereoCalibration：采集与离线框选标定
 
 程序 `stereo_calibration` 分两阶段运行。固定使用 **6×6 tag36h11 AprilGrid，标记黑色外框88 mm、间隙26.4 mm、两层黑边、ID 0～35**。正看板面，ID每行从右向左递增，各行从上向下递增；按ID及标记解码角点顺序建立144个对应点。
-代码位于本目录；每轮对当前已接受图对分别拟合左右单目 K/D，再固定新内参完成不同原生分辨率的双目求解和 T 约束。
+程序按当前已接受的图对求解双目外参。内参可以由当前图对拟合，也可以从配置直接读取并固定。
 
 ## 构建
 
@@ -60,11 +60,13 @@ BMP 文件名成对相同，`dataset.yaml` 记录真实帧号和时间戳。图�
 
 ```bash
 ./build/stereo_calibration --calibration
-# 直接指定配对图片，无须提前单独拟合或提供内参文件：
+# 指定配对图片并重拟合左右内参
 ./build/stereo_calibration --calibration --input=/absolute/path/Input
+# 从 config/dart.yaml 读取已有内参，只求双目外参
+./build/stereo_calibration --calibration --fixed-intrinsics --input=/absolute/path/Input
 ```
 
-这个模式不打开相机，也不依赖旧的K/D文件。原生尺寸直接从配对BMP读取；每次接受或移除图对，后台使用同一个选择快照先分别调用calibrateCamera拟合左右五参数内参，再固定新K/D求解双目R/T。三个阶段使用完全相同的图对，不单独筛除某一侧图片。
+离线标定直接读取配对 BMP。默认使用同一批已接受的图对分别拟合左右 `K/D`，再固定新 `K/D` 求解 `R/T`。使用 `--fixed-intrinsics` 时，直接读取 `config/dart.yaml` 中 `cameras.left` 和 `cameras.right` 的 `camera_matrix` 和 `distortion_coefficients`。可以用 `--config=/path/to/dart.yaml` 指定配置文件。左右 BMP 的原生尺寸必须分别与配置中的 `image_width` 和 `image_height` 一致。
 
 1. 左右原图在同一个窗口并排显示。按住鼠标左键，分别框选整块AprilGrid，周围留少量白边。
 2. 框选结束后立即在后台对选区原生像素运行 AprilTag解码和亚像素角点精修，无全图回退搜索；框选后的坐标会还原到原图坐标。
@@ -98,16 +100,16 @@ BMP 文件名成对相同，`dataset.yaml` 记录真实帧号和时间戳。图�
 
 - `Input/annotations.yaml` 自动保存框选、角点、接受/跳过状态。重新进入会恢复，并检查原始文件的名称、尺寸信息和修改时间；更换图片后不沿用旧角点。
 - 默认新建同级 `Results/calibration_<时间>/`，也可用 `--output=/NEW/directory` 指定新目录。
-- left_intrinsics.yaml / right_intrinsics.yaml：本轮选中图片拟合的左右K/D、原生尺寸、单目RMS及逐图角点/位姿，可直接供单目参数读取接口加载。
+- 默认重拟合模式生成 `left_intrinsics.yaml` 和 `right_intrinsics.yaml`，保存左右 `K/D`、原生尺寸、单目 RMS 和逐图角点及位姿。固定内参模式在两份双目结果中记录使用的 `K/D` 和来源。
 - `stereo.yaml` 记录最终参与的图对、原图角点、源帧信息、R/T/E/F、重投影与极线误差，以及约束前后的 T/RMS。
 - `reference.png` 显示受约束解中位和最差图对的局部极线参考图和原图。
-- `stereo_unconstrained.yaml` 单独保存同一批已接受图对的 **无 T 约束**结果：R、T_mm、E、F_reference、基线、总体 RMS、极线误差及逐对左右 RMS，并标记 `translation_constraint.enabled: 0`。它是约束优化前的原始 `stereoCalibrate(CALIB_FIX_INTRINSIC)` 解，两侧 K/D 固定为本轮单目标定的新结果。
+- `stereo_unconstrained.yaml` 保存同一批已接受图对调用 `stereoCalibrate(CALIB_FIX_INTRINSIC)` 的结果，包含 `R`、`T_mm`、`E`、`F_reference`、基线、总体 RMS、极线误差及逐对左右 RMS。`translation_constraint.enabled` 为 `0`。
 - `reference_unconstrained.png` 使用无约束解自己的 F 和误差选择中位/最差图对并绘制参考图。两套结果分别评价质量，均保留 `distance_validated: 0`。
 - 按 S 和正常退出自动保存时都会生成以上两套结果；图对相同，质量和误差指标各自计算。
 - 支持直接导入配对 BMP：两边文件名相同，或使用 `left1.bmp/right1.bmp`。只使用同 ID 图对；孤立文件会提示并忽略，重复 ID 报错。缺少采集清单时帧时间标记为未知，不冒充同步图对。
 
-显示总体 RMS、极线 P95/最大值、基线、R、T、左右单目RMS、边界命中和质量状态。
-先分别拟合左右单目K/D，再固定这两套新内参，联合优化R/T及各图对AprilGrid位姿。沿用右相机光心坐标系（x 右、y 下、z 沿光轴向前）和：
+界面显示总体 RMS、极线 P95 和最大值、基线、`R/T`、边界命中和质量状态。重拟合模式显示左右单目 RMS，固定模式显示内参来源。
+两种模式都在固定左右 `K/D` 后优化 `R/T` 和各图对的 AprilGrid 位姿。以下约束使用右相机光心坐标系（x 向右、y 向下、z 沿光轴向前）。
 
 - `450 ≤ |Tx| ≤ 570 mm`，符号来自无约束初始解。
 - `|Ty| ≤ 60 mm`；`|Tz| ≤ 160 mm`。
