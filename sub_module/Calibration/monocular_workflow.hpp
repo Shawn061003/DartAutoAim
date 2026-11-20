@@ -2,6 +2,7 @@
 #include <cctype>
 #include <map>
 #include <limits>
+#include "../calibration_dataset.hpp"
 
 // Included after the monocular solver; capture never runs a target detector.
 namespace livecalib {
@@ -22,30 +23,31 @@ struct MonoRecord {
     aprilgrid::DetectionInfo manualMarkers;
 };
 struct MonoDataset {std::vector<MonoRecord> records;cv::Size size;};
-inline MonoDataset readDataset(const Options& o) {
+inline MonoDataset readDataset(const Options& o,bool allowEmpty=false) {
     ensure(fs::is_directory(o.input),"Input directory does not exist: "+o.input.string());
     MonoDataset result;
-    for(const auto& entry:fs::directory_iterator(o.input)) {
-        auto ext=entry.path().extension().string();
-        std::transform(ext.begin(),ext.end(),ext.begin(),[](unsigned char c){return std::tolower(c);});
-        if(!entry.is_regular_file() || ext!=".bmp" || entry.path().stem().string().find(".pending")!=std::string::npos) continue;
-        MonoRecord r;r.path=entry.path();r.key=entry.path().stem().string();r.sample.image=entry.path().filename().string();result.records.push_back(std::move(r));
+    std::map<std::string,fs::path> files;
+    for(const auto& directory:{o.input,o.input/"selected"}) for(const auto& path:calibration_dataset::images(directory)) {
+        ensure(files.emplace(path.filename().string(),path).second,"Duplicate image filename: "+path.filename().string());
+        MonoRecord r;r.path=path;r.key=path.stem().string();r.sample.image=fs::relative(path,o.input).string();result.records.push_back(std::move(r));
     }
     std::sort(result.records.begin(),result.records.end(),[](const MonoRecord& a,const MonoRecord& b){return a.path.filename()<b.path.filename();});
-    ensure(!result.records.empty(),"No BMP images in "+o.input.string());
+    ensure(allowEmpty || !result.records.empty(),"No BMP images in "+o.input.string());
     for(const auto& r:result.records) {
         const auto image=cv::imread(r.path.string(),cv::IMREAD_COLOR|cv::IMREAD_IGNORE_ORIENTATION);
         if(!image.empty()) {result.size=image.size();break;}
     }
-    ensure(!result.size.empty(),"No decodable BMP image in Input");
+    ensure(result.records.empty() || !result.size.empty(),"No decodable BMP image in Input");
     const auto manifest=o.input/"dataset.yaml";
     if(fs::exists(manifest)) {
         cv::FileStorage f(manifest.string(),cv::FileStorage::READ);ensure(f.isOpened(),"Cannot read collection manifest");
         ensure(static_cast<std::string>(f["camera_side"])==o.side,"Collection camera side differs from --side");
-        ensure(cv::Size(static_cast<int>(f["image_width"]),static_cast<int>(f["image_height"]))==result.size,"Manifest/native image dimensions differ");
+        const cv::Size size(static_cast<int>(f["image_width"]),static_cast<int>(f["image_height"]));
+        if(result.size.empty()) result.size=size;
+        ensure(size==result.size,"Manifest/native image dimensions differ");
         std::map<std::string,std::string> ids;
-        for(const auto& n:f["frames"]) ids[static_cast<std::string>(n["file"])]=static_cast<std::string>(n["frame_id"]);
-        for(auto& r:result.records) {const auto it=ids.find(r.sample.image);if(it!=ids.end()) r.sample.frameId=std::stoull(it->second);}
+        for(const auto& n:f["frames"]) ids[fs::path(static_cast<std::string>(n["file"])).filename().string()]=static_cast<std::string>(n["frame_id"]);
+        for(auto& r:result.records) {const auto it=ids.find(r.path.filename().string());if(it!=ids.end()) r.sample.frameId=std::stoull(it->second);}
     }
     return result;
 }
@@ -59,7 +61,7 @@ inline void saveAnnotations(const Options& o,const MonoDataset& data) {
     f<<"schema_version"<<2<<"camera_side"<<o.side<<"columns"<<o.board.width<<"rows"<<o.board.height
      <<"image_width"<<data.size.width<<"image_height"<<data.size.height<<"records"<<"[";
     for(const auto& r:data.records) {
-        f<<"{"<<"file"<<r.sample.image<<"stamp"<<fileStamp(r.path)<<"state"<<static_cast<int>(r.state)<<"roi"<<r.roi<<"points"<<r.sample.points<<"corner_ids"<<r.sample.pointIds;
+        f<<"{"<<"file"<<r.path.filename().string()<<"stamp"<<fileStamp(r.path)<<"state"<<static_cast<int>(r.state)<<"roi"<<r.roi<<"points"<<r.sample.points<<"corner_ids"<<r.sample.pointIds;
         aprilgrid::writeManualMarkers(f,"manual_markers",r.manualMarkers);f<<"}";
     }
     f<<"]";f.release();fs::rename(pending,o.input/"annotations.yaml");
@@ -70,9 +72,9 @@ inline void loadAnnotations(const Options& o,MonoDataset& data) {
     ensure(static_cast<int>(f["schema_version"])==2 && aprilgrid::matchesSpecification(f) && static_cast<std::string>(f["camera_side"])==o.side &&
         static_cast<int>(f["columns"])==o.board.width && static_cast<int>(f["rows"])==o.board.height &&
         cv::Size(static_cast<int>(f["image_width"]),static_cast<int>(f["image_height"]))==data.size,"Annotation camera/board/dimensions mismatch");
-    std::map<std::string,MonoRecord*> files;for(auto& r:data.records) files[r.sample.image]=&r;
+    std::map<std::string,MonoRecord*> files;for(auto& r:data.records) files[r.path.filename().string()]=&r;
     for(const auto& n:f["records"]) {
-        const auto it=files.find(static_cast<std::string>(n["file"]));if(it==files.end()) continue;
+        const auto it=files.find(fs::path(static_cast<std::string>(n["file"])).filename().string());if(it==files.end()) continue;
         auto& r=*it->second;if(static_cast<std::string>(n["stamp"])!=fileStamp(r.path)) {std::cerr<<"Ignoring stale annotation: "<<r.path<<'\n';continue;}
         cv::Rect roi;std::vector<cv::Point2f> points;n["roi"]>>roi;n["points"]>>points;
         std::vector<int> ids;if(!n["corner_ids"].empty()) n["corner_ids"]>>ids;
@@ -86,31 +88,50 @@ inline void loadAnnotations(const Options& o,MonoDataset& data) {
 }
 
 class MonoWriter {
-    Options options_;cv::Size size_;std::vector<CameraFrame> metadata_;
+    struct Captured {std::string file;std::uint64_t frameId;std::int64_t timestamp;};
+    Options options_;cv::Size size_;std::vector<Captured> metadata_;
+    std::size_t total_=0;
+    std::uint64_t next_=1;
+    void reload() {
+        const auto data=readDataset(options_,true);size_=data.size;total_=data.records.size();
+        std::vector<std::string> keys;metadata_.clear();
+        for(const auto& record:data.records) keys.push_back(record.key);
+        if(fs::exists(options_.input/"dataset.yaml")) {
+            cv::FileStorage f((options_.input/"dataset.yaml").string(),cv::FileStorage::READ);
+            for(const auto& n:f["frames"]) {
+                const fs::path file=static_cast<std::string>(n["file"]);
+                keys.push_back(file.stem().string());
+                metadata_.push_back({file.filename().string(),std::stoull(static_cast<std::string>(n["frame_id"])),
+                                     std::stoll(static_cast<std::string>(n["timestamp_ms"]))});
+            }
+        }
+        next_=calibration_dataset::nextNumber(keys);
+    }
     void manifest() const {
         cv::FileStorage f((options_.input/"dataset.pending.yaml").string(),cv::FileStorage::WRITE);ensure(f.isOpened(),"Cannot write collection manifest");
         f<<"schema_version"<<1<<"camera_side"<<options_.side<<"image_width"<<size_.width<<"image_height"<<size_.height
          <<"config_source"<<fs::absolute(options_.config).string()<<"timestamp_convention"<<"host_receive_ms"<<"frames"<<"[";
-        for(std::size_t i=0;i<metadata_.size();++i) f<<"{"<<"file"<<cv::format("%06d.bmp",static_cast<int>(i+1))
-            <<"frame_id"<<std::to_string(metadata_[i].frame_id)<<"timestamp_ms"<<std::to_string(metadata_[i].timestamp_ms)<<"}";
+        for(const auto& frame:metadata_) f<<"{"<<"file"<<frame.file
+            <<"frame_id"<<std::to_string(frame.frameId)<<"timestamp_ms"<<std::to_string(frame.timestamp)<<"}";
         f<<"]";f.release();fs::rename(options_.input/"dataset.pending.yaml",options_.input/"dataset.yaml");
     }
 public:
     explicit MonoWriter(Options o):options_(std::move(o)) {
-        ensure(!fs::exists(options_.input) || (fs::is_directory(options_.input) && fs::is_empty(options_.input)),"Collection requires a NEW or empty --input directory; existing images are never overwritten");
-        fs::create_directories(options_.input);
+        calibration_dataset::Lock lock(options_.input);reload();
     }
-    std::size_t count() const {return metadata_.size();}
+    std::size_t count() const {return total_;}
     std::size_t append(const CameraFrame& frame) {
+        calibration_dataset::Lock lock(options_.input);reload();
         ensure(!frame.image.empty(),"Cannot save an empty camera image");
         if(size_.empty()) size_=frame.image.size();
         ensure(frame.image.size()==size_,"Camera frame dimensions changed during collection");
-        const auto stem=cv::format("%06d",static_cast<int>(metadata_.size()+1));
+        const auto digits=std::to_string(next_);const auto stem=std::string(digits.size()<6?6-digits.size():0,'0')+digits;
         const auto temporary=options_.input/(stem+".pending.bmp"),target=options_.input/(stem+".bmp");
-        ensure(!fs::exists(target),"Refusing to overwrite "+target.string());
+        ensure(!fs::exists(target) && !fs::exists(options_.input/"selected"/target.filename()),"Refusing to overwrite "+target.string());
         ensure(cv::imwrite(temporary.string(),frame.image),"Cannot save BMP");fs::rename(temporary,target);
-        CameraFrame meta=frame;meta.image.release();metadata_.push_back(std::move(meta));
+        metadata_.push_back({target.filename().string(),frame.frame_id,frame.timestamp_ms});
         try {manifest();}catch(...) {metadata_.pop_back();fs::remove(target);throw;}
+        ++total_;
         return count();
     }
 };
@@ -120,7 +141,7 @@ inline int collect(const Options& o) {
     const DartCongfig config(o.config.string());const auto& params=o.side=="left"?config.leftCamera:config.rightCamera;
     CameraStopSignals signals;LatestCamera camera(params,o.side=="left"?CameraSide::Left:CameraSide::Right);
     std::future<std::size_t> saving;std::optional<CameraFrame> latest;
-    std::size_t count=0;bool automatic=o.automatic,request=false;
+    std::size_t count=writer.count();bool automatic=o.automatic,request=false;
     auto received=Clock::now(),lastSaved=received-std::chrono::hours(1);std::string status="等待相机图像";
     std::cout<<"Collect "<<o.side<<" native BMPs into "<<o.input<<"; no chessboard detection or video encoding.\n";
     cv::namedWindow(collectWindow,cv::WINDOW_NORMAL);cv::resizeWindow(collectWindow,1280,850);
@@ -215,7 +236,23 @@ class MonoReview {
     std::string status_="框选可见的 AprilGrid 标记；至少检出 25 个 ID";
     MonoRecord& current() {return data_.records[index_];}
     const MonoRecord& current() const {return data_.records[index_];}
-    void persist() const {saveAnnotations(o_,data_);}
+    void persist() {
+        // 报告的后台保存会读取源图，等它结束后再移动图片。
+        if(saving_.valid()) savedRevision_=saving_.get();
+        calibration_dataset::Lock lock(o_.input);
+        std::vector<calibration_dataset::Move> moves;
+        for(auto& record:data_.records) {
+            const auto directory=record.state==MonoRecord::State::Accepted?o_.input/"selected":o_.input;
+            const auto target=fs::absolute(directory/record.path.filename()).lexically_normal();
+            if(record.path!=target) moves.push_back({&record.path,target});
+        }
+        const auto updatePaths=[&] {
+            for(auto& record:data_.records) record.sample.image=fs::relative(record.path,o_.input).string();
+        };
+        try {
+            calibration_dataset::moveImages(moves,[&] {updatePaths();saveAnnotations(o_,data_);});
+        } catch(...) {updatePaths();throw;}
+    }
     void changed() {++revision_;solved_={};needFit_=true;persist();}
     void commitCorners() {
         auto& r=current();const bool included=r.state==MonoRecord::State::Accepted;
@@ -269,6 +306,7 @@ public:
     explicit MonoReview(Options o):o_(std::move(o)),data_(readDataset(o_)) {
         loadAnnotations(o_,data_);ensure(selected(data_.records).size()<=static_cast<std::size_t>(o_.maxViews),"Saved selection exceeds --max-views; increase the limit");
         ensure(!fs::exists(o_.output),"Output already exists; choose a new --output directory");fs::create_directories(o_.output);
+        persist();
         const auto it=std::find_if(data_.records.begin(),data_.records.end(),[](const MonoRecord& r){return r.state==MonoRecord::State::Pending;});
         load(it==data_.records.end()?0:static_cast<std::size_t>(it-data_.records.begin()));
     }

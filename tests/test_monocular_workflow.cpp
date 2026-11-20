@@ -23,7 +23,7 @@ int main() {
         check(writer.append(frame)==1,"Cannot collect native BMP");
         frame.image=cv::Mat(size,CV_8UC3,cv::Scalar(128,128,128));++frame.frame_id;writer.append(frame);
         const auto loaded=cv::imread((o.input/"000001.bmp").string());check(loaded.size()==size && cv::norm(loaded,original)==0,"BMP changed raw pixels");
-        bool refused=false;try {MonoWriter duplicate(o);}catch(const std::runtime_error&){refused=true;}check(refused,"Existing data was not protected");
+        MonoWriter resumedWriter(o);check(resumedWriter.count()==2,"Existing collection did not resume");
         const auto dataset=readDataset(o);check(dataset.records.size()==2 && dataset.records.front().sample.frameId==121,"Frame manifest identity lost");
         std::vector<cv::Point2f> points;
         check(detectRoi(loaded,roi,o.board,points),"Native ROI board not found");
@@ -89,6 +89,7 @@ int main() {
         app.mouse(cv::EVENT_LBUTTONDOWN,cvRound(a.x),cvRound(a.y),0);app.mouse(cv::EVENT_MOUSEMOVE,cvRound(b.x),cvRound(b.y),cv::EVENT_FLAG_LBUTTON);app.mouse(cv::EVENT_LBUTTONUP,cvRound(b.x),cvRound(b.y),0);
         waitDetector(app);app.key(' ');app.key('b');
         check(selected(app.dataset().records).size()==1,"Complete ROI could not be accepted");
+        check(fs::exists(o.input/"selected/000001.bmp") && !fs::exists(o.input/"000001.bmp"),"Accepted image was not moved into selected");
         const auto covered=app.render();const cv::Point2f first=app.dataset().records[0].sample.points.front();
         const cv::Point cellPoint(10+static_cast<int>(first.x*10/size.width)*40+20,675+static_cast<int>(first.y*10/size.height)*20+10);
         check(covered.at<cv::Vec3b>(cellPoint)==cv::Vec3b(55,140,55),"Included corners missing from bottom-left coverage grid");
@@ -124,9 +125,21 @@ int main() {
         const auto committed=app.dataset().records[0].sample.points;
         app.key(' ');app.key('b');check(selected(app.dataset().records)[0].points==committed,"Reaccepting ignored manual corners");
         app.key('d');check(selected(app.dataset().records).empty() && app.render().at<cv::Vec3b>(cellPoint)==cv::Vec3b(40,40,40),"Removed image remained in coverage");
+        check(fs::exists(o.input/"000001.bmp") && !fs::exists(o.input/"selected/000001.bmp"),"Deselected image was not returned to input");
         app.key(' ');auto resumed=readDataset(o);loadAnnotations(o,resumed);
         check(resumed.records[0].state==MonoRecord::State::Accepted && cv::norm(resumed.records[0].roi.tl()-roi.tl())<=3 && cv::norm(resumed.records[0].roi.br()-roi.br())<=3,"Annotations did not resume");
         app.finish();
+        resumedWriter.append(frame);
+        check(fs::exists(o.input/"000003.bmp") && readDataset(o).records.size()==3,
+              "Appending after selection reused an archived filename or lost existing images");
+        cv::FileStorage history((o.input/"dataset.yaml").string(),cv::FileStorage::READ);
+        check(history["frames"].size()==3 && static_cast<std::string>(history["frames"][0]["frame_id"])=="121",
+              "Appending capture replaced historical metadata");
+        writer.append(frame);
+        check(writer.count()==4 && fs::exists(o.input/"000004.bmp"),"A second writer reused stale capture numbering");
+        CameraFrame resized=frame;resized.image=cv::Mat(100,100,CV_8UC3);
+        bool mismatch=false;try{resumedWriter.append(resized);}catch(const std::runtime_error&){mismatch=true;}
+        check(mismatch && !fs::exists(o.input/"000005.bmp"),"Changed capture dimensions were accepted");
         // Partial edits retain their IDs and can participate in calibration.
         Options partial=o;partial.input=root/"Partial";partial.output=root/"PartialResult";fs::create_directories(partial.input);
         check(cv::imwrite((partial.input/"000001.bmp").string(),incomplete),"Cannot write partial edit fixture");

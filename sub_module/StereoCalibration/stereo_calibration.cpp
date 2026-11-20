@@ -95,7 +95,7 @@ int Collect(Settings s) {
     Require(s.pairMs>=0 && s.pairMs<=1000,"Invalid receive-time tolerance");
     CameraStopSignals signals;LatestCollectionPair camera(config,s.pairMs);PairWriter writer(s.input,s.pairMs);
     std::future<std::size_t> saving;std::optional<StereoFrame> latest;
-    std::size_t count=0;bool automatic=true,request=false;
+    std::size_t count=writer.count();bool automatic=true,request=false;
     auto lastPairAt=Clock::now(),lastSavedAt=Clock::now()-std::chrono::hours(1);
     std::string status="等待左右相机配对图像";
     std::cout<<"Collect native paired BMPs into "<<s.input<<"; receive tolerance="<<s.pairMs<<" ms, interval="<<s.interval<<" s\n"
@@ -144,7 +144,20 @@ class Review {
     int count(Record::State state) const {return static_cast<int>(std::count_if(dataset_.records.begin(),dataset_.records.end(),[&](const Record& r){return r.state==state;}));}
     Record& current(){return dataset_.records[index_];}
     const Record& current() const {return dataset_.records[index_];}
-    void persist(){SaveAnnotations(settings_.input/"annotations.yaml",dataset_.records);}
+    void persist() {
+        if(saving_.valid()) savedRevision_=saving_.get();
+        calibration_dataset::Lock lock(settings_.input);
+        std::vector<calibration_dataset::Move> moves;
+        for(auto& record:dataset_.records) {
+            const auto root=record.state==Record::State::Accepted?settings_.input/"selected":settings_.input;
+            for(const auto& [path,side]:std::vector<std::pair<fs::path*,std::string>>{
+                    {&record.sample.pair.leftPath,"left"},{&record.sample.pair.rightPath,"right"}}) {
+                const auto target=fs::absolute(root/side/path->filename()).lexically_normal();
+                if(*path!=target) moves.push_back({path,target});
+            }
+        }
+        calibration_dataset::moveImages(moves,[&] {SaveAnnotations(settings_.input/"annotations.yaml",dataset_.records);});
+    }
     void changed() {++revision_;solved_={};needFit_=true;persist();}
     aprilgrid::DetectionInfo& markers(int side) {return side==0?detected_.leftMarkers:detected_.rightMarkers;}
     void commitCorners() {
@@ -237,6 +250,7 @@ public:
         views_[0].area={12,64,660,650};views_[1].area={684,64,660,650};
         LoadAnnotations(settings_.input/"annotations.yaml",dataset_.records,left_.referenceSize,right_.referenceSize);
         Require(count(Record::State::Accepted)<=settings_.maxPairs,"已保存的选择超过 --max-pairs，请增大数量上限");
+        persist();
         const auto pending=std::find_if(dataset_.records.begin(),dataset_.records.end(),[](const Record& r){return r.state==Record::State::Pending;});
         load(pending==dataset_.records.end()?0:static_cast<std::size_t>(pending-dataset_.records.begin()));
         ++revision_;needFit_=true;

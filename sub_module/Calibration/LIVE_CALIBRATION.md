@@ -38,7 +38,7 @@ sub_module/Calibration/Input/
   right/dataset.yaml
 ```
 
-`--input=/new/directory` 可指定当前单相机的图片文件夹。采集仅允许新的或空目录，拒绝覆盖已有数据；需要再录一组时指定新目录。
+`--input=/path/to/directory` 指定当前单相机的数据目录。重复执行采集会扫描历史图片和 `selected/`，从最大编号继续保存，可把不同距离的图片积累在同一个目录。更换距离时保持镜头对焦、变焦和图像尺寸一致。
 保存原始分辨率、未标注 BMP，不另存视频。`dataset.yaml` 记录相机侧、原始尺寸、帧号及主机接收时间。
 默认每秒抽取一帧，`--interval=1` 调整间隔。采集不运行AprilGrid检测，不自动判断清晰度，请在保存时停稳标定板。
 写盘与取帧在后台运行，预览保持更新；只保留一个写盘任务，不积压旧帧。
@@ -65,6 +65,8 @@ sub_module/Calibration/Input/
 4. 至少接受 3 张后后台求解；增加、移除、重框图片后重新求解。默认质量评价至少 10 张，上限 30 张，用 `--min-views` 和 `--max-views` 调整。
 5. **左下角始终显示原始传感器坐标下的覆盖网格**。绿色只来自当前已纳入标定的图片角点；移除、重框或跳过已接受图片时立即重建覆盖图。未接受图片不计入覆盖。
 6. 右侧列出实际参与的图片和单张 RMS，并显示总体/最差 RMS、fx/fy/cx/cy、焦距统计区间及数量、置信度、覆盖评价。求解期间清空旧指标。
+
+按空格接受图片时，原图移入当前数据目录的 `selected/`。移出标定、撤销接受、重新框选或编辑角点后，图片移回数据目录，重新接受后再移入 `selected/`。程序同时读取两个位置，并恢复历史标注。默认左目目录举例为 `sub_module/Calibration/Input/left/selected/`，右目为 `sub_module/Calibration/Input/right/selected/`。
 
 | 操作 | 功能 |
 |---|---|
@@ -107,7 +109,7 @@ cmake --build build/live-calibration --target dart_monocular_workflow_test dart_
 ctest --test-dir build/live-calibration -R 'monocular_workflow|live_calibration' --output-on-failure
 ```
 
-检查覆盖 BMP 原图保持、拒绝覆盖、原始 ROI 坐标、跳过时丢弃旧检测、标注恢复/失效、增删后的覆盖网格、已知内参恢复及报告格式，并直接调用鼠标处理函数检查右键、滚轮、平移和缩放。
+检查追加采集、历史帧信息、图片归档和移回、原始 ROI 坐标、过期检测丢弃、标注恢复、覆盖网格、内参恢复和报告格式，并调用鼠标处理函数检查右键、滚轮、平移和缩放。
 真实相机采集、桌面系统传递的鼠标事件和最终精度仍需实机验收。
 
 ## AprilGrid标注兼容性

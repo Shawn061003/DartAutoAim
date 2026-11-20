@@ -45,7 +45,7 @@ int main() {
         Reject([&]{parse({"stereo_calibration","--collect","--fixed-intrinsics"});},"Fixed intrinsics accepted in collection mode");
         {PairWriter empty(root/"empty_capture",5);}
         {PairWriter retry(root/"empty_capture",20);Check(retry.count()==0,"Empty failed collection could not be retried");}
-        // Lossless collection, explicit timing gate and refusal to overwrite a prior session.
+        // Lossless collection, explicit timing gate and continuation of historical captures.
         PairWriter writer(root/"capture",5);StereoFrame pair;
         pair.left.image=cv::Mat(960,1280,CV_8UC3,cv::Scalar(210,210,210));pair.right.image=cv::Mat(720,960,CV_8UC3,cv::Scalar(210,210,210));
         const auto expectedLeft=Board(pair.left.image,{300,240},40),expectedRight=Board(pair.right.image,{160,180},50);
@@ -58,7 +58,18 @@ int main() {
               loaded.records[0].sample.leftId==123 && loaded.records[0].sample.rightId==456 && loaded.records[0].sample.rightTime==10004,"Manifest lost source frame/time identity");
         pair.right.timestamp_ms=10006;Reject([&]{writer.append(pair);},"Out-of-tolerance collection accepted");
         Check(writer.count()==1 && !fs::exists(root/"capture/left/000002.bmp"),"Rejected pair left half a saved sample");
-        Reject([&]{PairWriter overwrite(root/"capture",5);},"Existing capture session overwritten");
+        {PairWriter resumed(root/"capture",5);Check(resumed.count()==1,"Existing stereo collection did not resume");}
+        fs::create_directories(root/"rollback");
+        fs::path rollbackLeft=root/"rollback/left.bmp",rollbackRight=root/"rollback/right.bmp";
+        Check(cv::imwrite(rollbackLeft.string(),pair.left.image) && cv::imwrite(rollbackRight.string(),pair.right.image),"Cannot create move rollback fixture");
+        Reject([&] {
+            calibration_dataset::moveImages({{&rollbackLeft,root/"rollback/selected/left.bmp"},
+                                             {&rollbackRight,root/"rollback/selected/right.bmp"}},
+                                            [] {throw std::runtime_error("Simulated annotation write failure");});
+        },"Annotation failure did not fail the move transaction");
+        Check(rollbackLeft==root/"rollback/left.bmp" && rollbackRight==root/"rollback/right.bmp" &&
+              fs::exists(rollbackLeft) && fs::exists(rollbackRight) && !fs::exists(root/"rollback/selected/left.bmp"),
+              "Failed annotation write did not restore both images and their paths");
         Check(PairKey("left000010",true)=="10" && PairKey("right_0010",false)=="10" && KeyLess("2","10"),"Pair ID normalization/sorting failed");
         fs::copy_file(root/"capture/left/000001.bmp",root/"capture/left/left1.bmp");
         Reject([&]{ReadDataset(root/"capture");},"Ambiguous duplicate pair IDs accepted");fs::remove(root/"capture/left/left1.bmp");
@@ -127,7 +138,15 @@ int main() {
         partialReload.update();Check(partialReload.records()[0].leftManualMarkers.corners==manual.corners,"Partial stereo correction did not resume");partialReload.finish();
         // Create an offline dataset with known projected observations for an actual incremental constrained fit.
         const fs::path input=root/"Input";fs::create_directories(input/"left");fs::create_directory(input/"right");
-        for(int i=1;i<=4;++i) {fs::copy_file(root/"capture/left/000001.bmp",input/"left"/(std::to_string(i)+".bmp"));fs::copy_file(root/"capture/right/000001.bmp",input/"right"/(std::to_string(i)+".bmp"));}
+        const auto archived=ReadDataset(root/"capture");
+        Check(fs::exists(root/"capture/selected/left/000001.bmp") && fs::exists(root/"capture/selected/right/000001.bmp"),
+              "Accepted stereo pair was not archived together");
+        pair.right.timestamp_ms=10004;writer.append(pair);
+        auto appended=ReadDataset(root/"capture");
+        Check(appended.records.size()==2 && appended.records[0].sample.leftId==123 &&
+              fs::exists(root/"capture/left/000002.bmp") && fs::exists(root/"capture/right/000002.bmp"),
+              "Stereo append lost selected images, metadata or filename numbering");
+        for(int i=1;i<=4;++i) {fs::copy_file(archived.records[0].sample.pair.leftPath,input/"left"/(std::to_string(i)+".bmp"));fs::copy_file(archived.records[0].sample.pair.rightPath,input/"right"/(std::to_string(i)+".bmp"));}
         Camera left{(cv::Mat_<double>(3,3)<<1600,0,640,0,1600,480,0,0,1),cv::Mat::zeros(5,1,CV_64F),{1280,960}};
         Camera right{(cv::Mat_<double>(3,3)<<2000,0,480,0,2000,360,0,0,1),cv::Mat::zeros(5,1,CV_64F),{960,720}};
         auto data=ReadDataset(input);cv::Mat rotation;cv::Rodrigues(cv::Vec3d(.004,.02,-.003),rotation);const cv::Mat translation=(cv::Mat_<double>(3,1)<<-510,2,12);
@@ -227,6 +246,9 @@ int main() {
         const auto committed=review.records()[3].sample.pair.right;review.key(' ');
         Check(Selected(review.records()).back().pair.right==committed,"Reaccepting stereo pair ignored manual corners");
         review.key('d');Check(review.records()[3].state==Record::State::Pending && review.solution().R.empty(),"Removed pair left stale fit metrics visible");
+        Check(fs::exists(input/"left/4.bmp") && fs::exists(input/"right/4.bmp") &&
+              !fs::exists(input/"selected/left/4.bmp") && !fs::exists(input/"selected/right/4.bmp"),
+              "Deselected stereo pair was not returned together");
         Poll(review,[&]{return review.solution().pairs.size()==3;});
         review.key('s');const int result=review.finish();Check(result==0,"Valid offline ROI fit did not pass quality checks");
         cv::FileStorage report((settings.output/"stereo.yaml").string(),cv::FileStorage::READ);
