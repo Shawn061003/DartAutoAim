@@ -39,6 +39,7 @@ struct DetectionInfo {
     std::vector<std::vector<cv::Point2f>> corners; // 与ids对应，始终使用原图坐标。
     double scale=1.;
     int attempts=0;
+    bool denoised=false; // 本次返回的角点是否在高斯降噪图上检测并精修。
     bool complete() const {return ids.size()==kTags && duplicates.empty();}
     std::vector<int> missing() const {
         std::vector<int> result;
@@ -158,7 +159,7 @@ inline DetectionInfo readManualMarkers(const cv::FileNode& node,cv::Size size) {
 
 // 多尺度只提供检测初值；每次均回原生灰度图精修，不将插值像素作为标定观测。
 // allowPartial 允许至少25个唯一ID；默认完整检测供旧实时入口使用。
-inline bool detect(const cv::Mat& image,std::vector<cv::Point2f>& points,DetectionInfo* info=nullptr,bool allowPartial=false) {
+inline bool detectUnfiltered(const cv::Mat& image,std::vector<cv::Point2f>& points,DetectionInfo* info=nullptr,bool allowPartial=false) {
     points.clear();
     if(info) *info={};
     if(image.empty()) return false;
@@ -223,6 +224,36 @@ inline bool detect(const cv::Mat& image,std::vector<cv::Point2f>& points,Detecti
     points.reserve(kPointCount);
     for(const auto& marker:best.corners) points.insert(points.end(),marker.begin(),marker.end());
     return true;
+}
+
+// 双目可启用降噪回退：原图多尺度检测未找到完整36个唯一ID时才重试。
+// 降噪发生在原生尺寸，检测与亚像素精修均使用同一张降噪灰度图；不修改输入。
+inline bool detect(const cv::Mat& image,std::vector<cv::Point2f>& points,DetectionInfo* info=nullptr,
+                   bool allowPartial=false,bool denoiseFallback=false) {
+    DetectionInfo best;
+    detectUnfiltered(image,points,&best,allowPartial);
+    if(denoiseFallback && !best.complete() && !image.empty() && image.cols>=11 && image.rows>=11) {
+        cv::Mat gray,smooth;
+        if(image.channels()==1) gray=image;
+        else cv::cvtColor(image,gray,cv::COLOR_BGR2GRAY);
+        cv::GaussianBlur(gray,smooth,{5,5},1.0);
+        DetectionInfo retry;
+        std::vector<cv::Point2f> retryPoints;
+        detectUnfiltered(smooth,retryPoints,&retry,allowPartial);
+        const int attempts=best.attempts+retry.attempts;
+        // 不合并不同处理图的角点；检出相同时优先使用降噪图的精修结果。
+        if((retry.duplicates.empty() && !best.duplicates.empty()) ||
+           (retry.duplicates.empty()==best.duplicates.empty() &&
+            (retry.ids.size()>best.ids.size() ||
+             (retry.ids.size()==best.ids.size() && retry.duplicates.size()<=best.duplicates.size())))) {
+            best=std::move(retry);
+            best.denoised=true;
+        }
+        best.attempts=attempts;
+    }
+    points=allowPartial?visiblePoints(best):fullPoints(best);
+    if(info) *info=best;
+    return !points.empty();
 }
 
 inline void draw(cv::Mat& image,const DetectionInfo& info) {

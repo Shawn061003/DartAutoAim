@@ -96,7 +96,7 @@ std::map<int, fs::path> IndexFiles(const fs::path& dir, const std::string& side)
 bool Detect(const cv::Mat& image, std::vector<cv::Point2f>& points, bool realtime = false, int realtimeMaxEdge = 1600) {
     (void)realtime; (void)realtimeMaxEdge;
     // 原生分辨率检测；返回顺序由ID决定，不随板姿态或检测遍历顺序变化。
-    return aprilgrid::detect(image,points);
+    return aprilgrid::detect(image,points,nullptr,false,true);
 }
 
 MonocularFit FitMonocular(const std::vector<std::vector<cv::Point2f>>& points,cv::Size size,

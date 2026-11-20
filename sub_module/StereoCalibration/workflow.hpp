@@ -320,7 +320,7 @@ inline bool DetectRoi(const cv::Mat& raw,cv::Rect roi,std::vector<cv::Point2f>& 
     points.clear();if(info) *info={};
     if(raw.empty() || roi.width<24 || roi.height<24 || (roi&cv::Rect({},raw.size()))!=roi) return false;
     aprilgrid::DetectionInfo detected;
-    const bool found=aprilgrid::detect(raw(roi),points,&detected,true);
+    const bool found=aprilgrid::detect(raw(roi),points,&detected,true,true);
     const cv::Point2f offset(static_cast<float>(roi.x),static_cast<float>(roi.y));
     detected.translate(offset);if(info) *info=detected;
     if(!found) return false;

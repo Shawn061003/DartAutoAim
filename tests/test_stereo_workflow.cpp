@@ -78,6 +78,30 @@ int main() {
         auto detection=DetectPair(pair.left.image,pair.right.image,lr,rr,7,99);
         Check(detection.index==7 && detection.epoch==99 && detection.leftFound && detection.rightFound &&
               Error(detection.left,expectedLeft)<.2 && Error(detection.right,expectedRight)<.2,"ROI detection lost native coordinates or result generation");
+        Check(!detection.leftMarkers.denoised && !detection.rightMarkers.denoised,
+              "Complete raw AprilGrid unexpectedly used denoising");
+        // Low contrast plus deterministic sensor noise: retry only after incomplete raw search.
+        cv::Mat noisyBoard(720,960,CV_8UC3,cv::Scalar::all(210));
+        const auto noisyExpected=Board(noisyBoard,{180,150},50);
+        cv::Mat noisyGray,wide,noise(noisyBoard.size(),CV_16SC1);
+        cv::cvtColor(noisyBoard,noisyGray,cv::COLOR_BGR2GRAY);
+        noisyGray.convertTo(noisyGray,CV_8U,.25,95);
+        cv::RNG rng(179517);rng.fill(noise,cv::RNG::NORMAL,0,15);
+        noisyGray.convertTo(wide,CV_16S);wide+=noise;wide.convertTo(noisyGray,CV_8U);
+        const cv::Mat originalNoisy=noisyGray.clone();
+        aprilgrid::DetectionInfo rawMarkers,retriedMarkers,smoothMarkers;
+        std::vector<cv::Point2f> rawPoints,retriedPoints,smoothPoints;
+        aprilgrid::detect(noisyGray,rawPoints,&rawMarkers,true);
+        Check(!rawMarkers.complete(),"Noise fixture no longer exercises incomplete raw detection");
+        const bool retryFound=DetectRoi(noisyGray,{0,0,noisyGray.cols,noisyGray.rows},retriedPoints,&retriedMarkers);
+        Check(retryFound &&
+              retriedMarkers.complete() && retriedMarkers.denoised && retriedMarkers.attempts>rawMarkers.attempts &&
+              Error(retriedPoints,noisyExpected)<1.,cv::format("Denoise recovery: tags=%zu used=%d attempts=%d rawAttempts=%d RMS=%.3f",
+                  retriedMarkers.ids.size(),retriedMarkers.denoised,retriedMarkers.attempts,rawMarkers.attempts,Error(retriedPoints,noisyExpected)));
+        cv::Mat smooth;cv::GaussianBlur(noisyGray,smooth,{5,5},1.0);
+        Check(aprilgrid::detect(smooth,smoothPoints,&smoothMarkers) && cv::norm(retriedPoints,smoothPoints)==0,
+              "Fallback corners were not refined on the denoised native image");
+        Check(cv::norm(noisyGray,originalNoisy)==0,"Denoising changed the source image");
         cv::Mat partialLeft=pair.left.image.clone();partialLeft(cv::Rect(300+5*52,240,40,40)).setTo(cv::Scalar(210,210,210));
         const auto partial=DetectPair(partialLeft,pair.right.image,lr,rr,7,100);
         Check(partial.leftFound && partial.rightFound && partial.left.size()==140 && partial.right.size()==140 && partial.pointIds.front()==4 &&
