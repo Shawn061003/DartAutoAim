@@ -76,7 +76,7 @@ Options parseOptions(int argc, char** argv)
                      "./build/calibration --calibration --side=left [--input=/path/to/BMPs]\n"
                      "Collection: A=auto/pause, SPACE=save next frame, Q/ESC=quit.\n"
                      "Offline: LMB=ROI, wheel=zoom, RMB click=zoom in, Shift+RMB=zoom out, RMB drag=pan, SPACE=accept+next,\n"
-                     "N=skip, B/P=previous/next, R=clear ROI, D=remove, U=undo, S=save, +/-=zoom, [/]=list scroll, 0=reset zoom.\n";
+                     "N=skip, B/P=previous/next, R=clear ROI, T=redetect ROI, D=remove, U=undo, S=save, +/-=zoom, [/]=list scroll, 0=reset zoom.\n";
         return {};
     }
     const std::vector<std::string> keys{"collect", "calibration", "config", "side", "input", "output", "interval",

@@ -21,13 +21,13 @@ std::vector<LocationTransform::LocationTransformResult> LocationTransform::RunTr
         if(aim_base) {
             // 3. 基地远段模型使用15.8°姿态下关闭旧补偿的数据拟合。
             // 地面真值先减去镖口原点偏移(145, -60) mm，再旋转到镖口系。
-            correctedX = 1.0733 * x + 570.0;
-            correctedY = y + 1127.8 + 0.1232 * x;
+            correctedX =  x ;
+            correctedY = y ;
         }
         else {
             // 前哨站使用表一近段模型，来源为outputs/compensation_muzzle_20261104/muzzle_xy_models.json。
-            correctedX = 0.9967931135150897 * x - 0.0041306312564936779 * y + 76.847208117170993;
-            correctedY = 0.037181856240888093 * x + 1.0787931524777847 * y - 1319.4764685108794;
+            correctedX =  x ;
+            correctedY =  y ;
         }
         // 4. 输出当前镖口方向下的补偿结果；Z保留R/T转换结果。
         transformed.push_back({{correctedX, correctedY, dart[2]}, result.TargetName});

@@ -51,6 +51,24 @@ int main() {
         check(!detectRoi(frame.image,roi,o.board,points,&markers) && points.empty() && markers.ids.empty() && markers.missing().size()==36,
               "Blank ROI retained stale corners or diagnostic IDs");
         check(!detectRoi(frame.image,{-1,0,50,50},o.board,points,&markers) && markers.attempts==0,"Invalid ROI retained diagnostics");
+        // Low-contrast sensor noise fragmented the default threshold contours on real captures.
+        // Verify recovery against known corners, not merely an increased ID count.
+        cv::Mat noisyBoard(600,800,CV_8UC3,cv::Scalar(220,220,220));
+        const auto noisyExpected=renderAprilGrid(noisyBoard,{190,100},40);
+        cv::Mat gray,signal,noise(600,800,CV_32F),noisy;
+        cv::cvtColor(noisyBoard,gray,cv::COLOR_BGR2GRAY);gray.convertTo(signal,CV_32F,.08,20.);
+        cv::RNG random(12345);random.fill(noise,cv::RNG::NORMAL,0,5.);signal+=noise;signal.convertTo(noisy,CV_8U);
+        const auto noisyOriginal=noisy.clone();aprilgrid::DetectionInfo legacy;
+        check(!aprilgrid::detect(noisy,points,&legacy,true),"Noise fixture no longer exercises the original detector's failure");
+        check(detectRoi(noisy,{0,0,noisy.cols,noisy.rows},o.board,points,&markers) && markers.ids.size()>=25 &&
+              markers.duplicates.empty() && markers.denoised && markers.wideThresholds,
+              "Monocular noise/large-window fallback did not recover the board");
+        double squared=0;std::size_t count=0;
+        for(std::size_t i=0;i<markers.ids.size();++i) for(int corner=0;corner<4;++corner) {
+            const auto delta=markers.corners[i][corner]-noisyExpected[4*markers.ids[i]+corner];squared+=delta.dot(delta);++count;
+        }
+        check(std::sqrt(squared/count)<.8 && cv::norm(noisy,noisyOriginal)==0,
+              "Recovered corners are inaccurate or the grayscale input was modified");
         MonoViewport view;view.reset(size);const cv::Point2d native(700,600),screen=view.project(native);
         view.magnify(screen,2);check(cv::norm(view.unproject(screen)-native)<1e-8,"Zoom lost cursor anchor");
         const auto mapped=view.roi(view.project(roi.tl()),view.project(roi.br()));check(mapped==roi,"Zoomed ROI offset incorrect");
@@ -90,6 +108,11 @@ int main() {
         waitDetector(app);app.key(' ');app.key('b');
         check(selected(app.dataset().records).size()==1,"Complete ROI could not be accepted");
         check(fs::exists(o.input/"selected/000001.bmp") && !fs::exists(o.input/"000001.bmp"),"Accepted image was not moved into selected");
+        const auto retryRoi=app.dataset().records[0].roi;app.key('t');
+        check(selected(app.dataset().records).empty() && app.dataset().records[0].roi==retryRoi &&
+              app.dataset().records[0].sample.points.empty(),"ROI retry retained stale accepted observations or changed the ROI");
+        waitDetector(app);app.key(' ');app.key('b');
+        check(selected(app.dataset().records).size()==1,"Redetected ROI could not be accepted again");
         const auto covered=app.render();const cv::Point2f first=app.dataset().records[0].sample.points.front();
         const cv::Point cellPoint(10+static_cast<int>(first.x*10/size.width)*40+20,675+static_cast<int>(first.y*10/size.height)*20+10);
         check(covered.at<cv::Vec3b>(cellPoint)==cv::Vec3b(55,140,55),"Included corners missing from bottom-left coverage grid");

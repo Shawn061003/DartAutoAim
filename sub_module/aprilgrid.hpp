@@ -40,6 +40,7 @@ struct DetectionInfo {
     double scale=1.;
     int attempts=0;
     bool denoised=false; // 本次返回的角点是否在高斯降噪图上检测并精修。
+    bool wideThresholds=false; // 单目漏检回退是否使用更大的自适应阈值窗口。
     bool complete() const {return ids.size()==kTags && duplicates.empty();}
     std::vector<int> missing() const {
         std::vector<int> result;
@@ -159,7 +160,7 @@ inline DetectionInfo readManualMarkers(const cv::FileNode& node,cv::Size size) {
 
 // 多尺度只提供检测初值；每次均回原生灰度图精修，不将插值像素作为标定观测。
 // allowPartial 允许至少25个唯一ID；默认完整检测供旧实时入口使用。
-inline bool detectUnfiltered(const cv::Mat& image,std::vector<cv::Point2f>& points,DetectionInfo* info=nullptr,bool allowPartial=false) {
+inline bool detectUnfiltered(const cv::Mat& image,std::vector<cv::Point2f>& points,DetectionInfo* info=nullptr,bool allowPartial=false,bool wideThresholds=false) {
     points.clear();
     if(info) *info={};
     if(image.empty()) return false;
@@ -172,6 +173,10 @@ inline bool detectUnfiltered(const cv::Mat& image,std::vector<cv::Point2f>& poin
     // 默认周长比例会剔除5472像素全幅中约40像素宽的远处标记。
     parameters->minMarkerPerimeterRate=.005;
     parameters->cornerRefinementMethod=cv::aruco::CORNER_REFINE_NONE;
+    if(wideThresholds) {
+        parameters->adaptiveThreshWinSizeMax=73;
+        parameters->perspectiveRemovePixelPerCell=8;
+    }
     DetectionInfo best;
     int attempts=0;
     for(const double factor:{1.,1.5,2.,.75,.5}) {
@@ -186,7 +191,7 @@ inline bool detectUnfiltered(const cv::Mat& image,std::vector<cv::Point2f>& poin
         std::vector<std::vector<cv::Point2f>> corners;
         std::vector<int> ids;
         cv::aruco::detectMarkers(search,dictionary(),corners,ids,parameters);
-        DetectionInfo current;current.scale=factor;
+        DetectionInfo current;current.scale=factor;current.wideThresholds=wideThresholds;
         std::array<int,kTags> locations;locations.fill(-1);
         for(std::size_t i=0;i<ids.size();++i) {
             const int id=ids[i];
@@ -253,6 +258,40 @@ inline bool detect(const cv::Mat& image,std::vector<cv::Point2f>& points,Detecti
     }
     points=allowPartial?visiblePoints(best):fullPoints(best);
     if(info) *info=best;
+    return !points.empty();
+}
+
+// 离线单目：保留完整原图观测；漏检时才在原生分辨率降噪并扩展阈值窗口。
+// 更大的窗口覆盖大标记的双层黑边，增加解码采样不放宽字典/ID校验。
+// 精修使用各次原生尺寸的灰度图，始终保留真实测量角点，不用板模型补点。
+inline bool detectMonocular(const cv::Mat& image,std::vector<cv::Point2f>& points,DetectionInfo* info=nullptr) {
+    points.clear();
+    DetectionInfo best;
+    int attempts=0;
+    const auto attempt=[&](const cv::Mat& gray,bool denoised,bool wide) {
+        DetectionInfo candidate;
+        std::vector<cv::Point2f> found;
+        detectUnfiltered(gray,found,&candidate,true,wide);
+        candidate.denoised=denoised;
+        attempts+=candidate.attempts;
+        if((candidate.duplicates.empty() && !best.duplicates.empty()) ||
+           (candidate.duplicates.empty()==best.duplicates.empty() &&
+            candidate.ids.size()>best.ids.size()))
+            best=std::move(candidate);
+    };
+    attempt(image,false,false);
+    if(!best.complete() && !image.empty() && image.cols>=11 && image.rows>=11) {
+        cv::Mat gray,smooth;
+        if(image.channels()==1) gray=image;
+        else cv::cvtColor(image,gray,cv::COLOR_BGR2GRAY);
+        cv::GaussianBlur(gray,smooth,{5,5},1.0);
+        attempt(smooth,true,true);
+        if(!best.complete()) attempt(smooth,true,false);
+        if(!best.complete()) attempt(gray,false,true);
+    }
+    best.attempts=attempts;
+    if(info) *info=best;
+    points=visiblePoints(best);
     return !points.empty();
 }
 

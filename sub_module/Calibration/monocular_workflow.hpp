@@ -204,7 +204,7 @@ inline bool detectRoi(const cv::Mat& image,cv::Rect roi,cv::Size board,std::vect
     if(image.empty() || roi.width<24 || roi.height<24 || (roi&cv::Rect({},image.size()))!=roi ||
        board!=cv::Size(aprilgrid::kColumns,aprilgrid::kRows)) return false;
     aprilgrid::DetectionInfo detected;
-    const bool found=aprilgrid::detect(image(roi),points,&detected,true);
+    const bool found=aprilgrid::detectMonocular(image(roi),points,&detected);
     const cv::Point2f offset(static_cast<float>(roi.x),static_cast<float>(roi.y));
     detected.translate(offset);if(info) *info=detected;
     if(!found) return false;
@@ -361,6 +361,11 @@ public:
         }
         if(key=='n') {++epoch_;needDetection_=false;const bool included=r.state==MonoRecord::State::Accepted;r.state=MonoRecord::State::Skipped;if(included) changed();else persist();advance();return;}
         if(key=='d') {if(r.state==MonoRecord::State::Accepted) {r.state=MonoRecord::State::Pending;changed();status_="已移出标定，保留 ROI 和角点";}return;}
+        if(key=='t' || key=='T') {
+            if(raw_.empty() || r.roi.empty()) {status_="请先框选 ROI，再按 T 重新检测";return;}
+            const auto roi=r.roi;setRoi(roi);
+            status_="正在重新检测当前 ROI；核对后按空格接受";return;
+        }
         if(key=='r') {setRoi({});status_="已清除 ROI，请重新框选";return;}
         if(key==' ') {
             if(raw_.empty() || detectorBusy() || !detected_.found || r.roi.empty()) {status_="当前 ROI 至少需要 25 个唯一 ID 才能接受";return;}
@@ -455,7 +460,7 @@ public:
         text(canvas,status_.substr(0,140),15,635,{70,215,255});
         drawCoverage(canvas,data_.size,selected(data_.records));
         text(canvas,"绿色网格：已纳入图片的角点覆盖区域",10,900);
-        text(canvas,editor_.enabled?"精修中：拖动角点；滚轮放大；右键平移；Z 撤销；E 退出":"左键框选 ROI；E 精修角点；滚轮缩放；右键平移；0 重置",435,670);
+        text(canvas,editor_.enabled?"精修中：拖动角点；滚轮放大；右键平移；Z 撤销；E 退出":"左键框 ROI；T 重检；E 精修；滚轮缩放；右键平移",435,670);
         for(const auto& b:monoButtons()) {cv::rectangle(canvas,b.box,b.key=='e' && editor_.enabled?cv::Scalar(55,120,55):cv::Scalar(65,65,65),cv::FILLED);text(canvas,b.caption,b.box.x+8,b.box.y+27);}
         text(canvas,std::string("ROI 检测：")+(detectorBusy()?"处理中":"就绪")+" | 识别 "+std::to_string(detected_.markers.ids.size())+"/36"+cv::format(" | %.0f ms",detected_.ms),435,900);
         text(canvas,cv::format("检测尝试 %d 次 | 采用 %.2fx 尺度",detected_.markers.attempts,detected_.markers.scale),435,927);
